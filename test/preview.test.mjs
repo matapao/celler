@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { showApproval, showWrite } from "senter-mvp/preview"
+import { showApproval, showWrite } from "celler/preview"
 
 function mockDom() {
   const makeNode = tag => ({
@@ -54,7 +54,7 @@ test("preview escapes BiDi spoofing, sanitizes attachment filenames, formats siz
   // BiDi override is escaped rather than rendered raw.
   assert.ok(root.children[0].textContent.includes("\\u202e"))
   assert.ok(!root.children[0].textContent.includes("\u202E"))
-  // Attachment strips path traversal + BiDi and displays exact decoded byte size.
+  // The file name loses its path and BiDi override; the size counts decoded bytes.
   const link = root.children[1].children[0]
   assert.equal(link.download, "invoice_fdp.exe")
   assert.equal(link.rel, "noopener noreferrer")

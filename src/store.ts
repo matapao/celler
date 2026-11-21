@@ -20,8 +20,8 @@ export type EventKind =
   | "started" | "ended" | "call" | "returned" | "failed" | "cancelled" | "denied"
   | "approved" | "declined" | "delivery_failed" | "reconciled"
 
-// The approval lifecycle. Every change is a compare-and-set from the state on the left.
-// A crash while `started` also leads to `unknown`, and only the host's reconciliation leaves `unknown`.
+// The approval lifecycle. Every change is a compare-and-set from the state on the left. A crash while `started`
+// also leads to `unknown`, as the send may have arrived, and only the host's reconciliation leaves `unknown`.
 const lifecycle: Record<ApprovalState, readonly ApprovalState[]> = {
   pending: ["started", "declined"],
   started: ["sent", "unknown"],
@@ -68,13 +68,6 @@ export function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<
   })
 }
 
-function ensureColumn(db: DatabaseSync, table: string, column: string, definition: string) {
-  const columns = db.prepare(`PRAGMA table_info(${table})`).all()
-  if (!columns.some(col => col.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
-  }
-}
-
 export function openStore(db: DatabaseSync, limits: StoreLimits) {
   // synchronous=FULL makes every commit survive power loss. The pending→started commit must be durable before an
   // external send, or a reboot could offer the same approval again.
@@ -103,21 +96,13 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
     CREATE INDEX IF NOT EXISTS inbox ON approvals(owner, state);
     CREATE INDEX IF NOT EXISTS run_approvals ON approvals(run, state);
   `)
-  // Upgrade databases created by earlier schema versions in place.
-  ensureColumn(db, "revisions", "created_at", "INTEGER NOT NULL DEFAULT 0")
-  ensureColumn(db, "runs", "status", "TEXT NOT NULL DEFAULT 'running'")
-  ensureColumn(db, "runs", "created_at", "INTEGER NOT NULL DEFAULT 0")
-  ensureColumn(db, "events", "at", "INTEGER NOT NULL DEFAULT 0")
-  ensureColumn(db, "approvals", "created_at", "INTEGER NOT NULL DEFAULT 0")
-
-  // One service owns this database. A crash can leave a delivery past the point of no return.
+  // A `started` delivery was cut off by a crash and may have arrived. Safe only because one service owns the database.
   db.prepare("UPDATE approvals SET state='unknown' WHERE state='started'").run()
 
-  // Compiled once for hot-path performance.
   const insertRevision = db.prepare("INSERT INTO revisions(id,body,created_at) VALUES(?,?,?)")
   const selectRevision = db.prepare("SELECT body FROM revisions WHERE id=?")
   const insertRun = db.prepare("INSERT INTO runs(id,body,grants,status,created_at) VALUES(?,?,?,'running',?)")
-  const selectRun = db.prepare("SELECT body,grants,status FROM runs WHERE id=?")
+  const selectRun = db.prepare("SELECT body,grants FROM runs WHERE id=?")
   const selectRunStatus = db.prepare("SELECT status FROM runs WHERE id=?")
   const selectChildren = db.prepare("SELECT id FROM runs WHERE json_extract(body, '$.parent.run')=?")
   const updateRunStatus = db.prepare("UPDATE runs SET status=? WHERE id=? AND status='running'")
@@ -162,7 +147,6 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
     return {
       run: freezeRun(JSON.parse(String(row.body)) as Run),
       grants: JSON.parse(String(row.grants)) as string[],
-      status: String(row.status) as RunStatus,
     }
   }
   function ended(id: string): boolean {

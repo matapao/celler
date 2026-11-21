@@ -1,7 +1,7 @@
 import type { ApprovalState, RunStatus, Write } from "./store.js"
 
 // What a reviewer could not see: controls, format characters (bidi, zero-width, tag), private-use, unassigned and
-// surrogate code points, and every separator but the plain space. Displayed text keeps tab and newline.
+// surrogate code points, and every separator but the plain space. Tab, newline and carriage return stay.
 const HIDDEN = /(?![\t\n\r ])[\p{C}\p{Z}]/gu
 const HIDDEN_IN_NAME = /(?! )[\p{C}\p{Z}]/gu
 // A long run of spaces after text can push the rest of a line out of view.
@@ -72,6 +72,7 @@ export function showWrite(element: HTMLElement, write: Write) {
     link.textContent = `${safeName} (${reveal(file.mediaType).shown}, ${formatBytes(bytes.byteLength)})`
     link.download = safeName
     link.rel = "noopener noreferrer"
+    // octet-stream, not the packet's own media type: a blob of HTML would run in this page's origin.
     if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
       const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }))
       createdUrls.push(url)
@@ -110,6 +111,7 @@ export function showApproval(
         await decide(item.id, choice)
         status.textContent = choice === "approve" ? "Submitted" : "Declined"
       } catch {
+        // approve() can fail after the send was recorded, so never claim it failed.
         status.textContent = "Refresh to check the recorded decision."
       }
     }

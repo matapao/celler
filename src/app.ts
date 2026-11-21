@@ -8,9 +8,9 @@ import {
   CallToolRequestSchema, CallToolResultSchema, ErrorCode, ListToolsRequestSchema, McpError,
 } from "@modelcontextprotocol/sdk/types.js"
 import type { CallToolResult, Task, Tool } from "@modelcontextprotocol/sdk/types.js"
-import { compileGraph, type Binding, type Graph, type Unit } from "./catalog.js"
+import { compileGraph, type Binding, type Graph, type Cell } from "./catalog.js"
 import { discover, discoverTool, invocation, invokeTool } from "./discovery.js"
-import { fail, parseWith, SenterError } from "./errors.js"
+import { fail, parseWith, CellerError } from "./errors.js"
 import { canonicalJson, normalizeJson } from "./json.js"
 import { appLimits, withLimits } from "./limits.js"
 import { freezeRun, openStore, raceAbort, type Run, type Write } from "./store.js"
@@ -18,10 +18,10 @@ import { freezeRun, openStore, raceAbort, type Run, type Write } from "./store.j
 type Args = Record<string, unknown>
 
 /**
- * A host capability behind a tool. An adapter either `call`s at once, or `prepare`s a complete packet that a person
- * approves before `send` delivers exactly that packet. Anything that moves data to a third party takes the second
- * form. `send`, or `verify` before it, must refuse a packet it would not produce now, such as one for another account
- * or destination.
+ * A host capability behind a tool. It either `call`s at once, or `prepare`s a complete packet that a person approves
+ * before `send` delivers exactly that packet. Anything that moves data to a third party takes the second form.
+ * `verify`, or else `send`, must refuse a packet the adapter would not produce now, such as one for another account.
+ * A refusal in `verify` keeps the approval pending; a throw from `send` leaves the delivery `unknown`.
  */
 export type Adapter =
   | { call(run: Run, args: Args, signal: AbortSignal): Promise<CallToolResult> }
@@ -32,8 +32,10 @@ export type Adapter =
     }
 
 export type Platform = {
+  /** The live policy for node `id`, asked on every listing and call: keep it fast. */
   allowed(run: Run, id: string): boolean
-  launch(spec: Run & { profile: string; context: Unit["context"]; input: unknown },
+  /** Starts the harness, hands its MCP transport to `connect`, and settles with the run's result. */
+  launch(spec: Run & { profile: string; context: Cell["context"]; input: unknown },
     connect: (transport: Transport, nativeDiscovery?: boolean) => Promise<void>,
     signal: AbortSignal): Promise<CallToolResult>
 }
@@ -42,6 +44,7 @@ export type Start = Pick<Run, "owner" | "revision" | "entry" | "workspace"> & { 
 export type AppOptions = {
   database: DatabaseSync
   platform: Platform
+  /** The host's adapters by id, read live: the host may add one for tools it publishes later. */
   adapters: ReadonlyMap<string, Adapter>
 } & Partial<typeof appLimits>
 
@@ -77,27 +80,27 @@ function checkedResult(current: Graph, id: string, value: unknown): CallToolResu
 }
 
 const hash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex")
-const codeOf = (error: unknown) => (error instanceof SenterError ? error.code : undefined)
+const codeOf = (error: unknown) => (error instanceof CellerError ? error.code : undefined)
 
-// Without `senter/call-id`, a call is keyed by its tool and arguments, so a blind retry joins the same approval or
-// delegated run instead of creating a second one.
+// Without `celler/call-id`, the tool and arguments are the key, so a blind retry joins the first call's approval
+// or child run.
 function callKey(meta: Record<string, unknown> | undefined, tool: string, args: Args): string {
-  const key = meta?.["senter/call-id"]
+  const key = meta?.["celler/call-id"]
   if (key === undefined) return hash([tool, args])
   if (typeof key !== "string" || key.length === 0 || key.length > 128 || /[\x00-\x1f\x7f]/.test(key)) {
-    throw new McpError(ErrorCode.InvalidParams, "Invalid senter/call-id metadata key")
+    throw new McpError(ErrorCode.InvalidParams, "Invalid celler/call-id metadata key")
   }
   return key
 }
 
-// A tool failure goes back as a result the model can read and act on (MCP 2025-11-25). Only this library's own
-// messages are shown: raw host, adapter or SQLite errors never cross to the harness.
+// Failures return as results the model can read and act on (MCP 2025-11-25). Only this library's own messages
+// show: raw host, adapter and SQLite errors never reach the harness.
 function refusal(error: unknown): CallToolResult {
-  const text = error instanceof SenterError || error instanceof McpError ? error.message : "Tool execution failed"
+  const text = error instanceof CellerError || error instanceof McpError ? error.message : "Tool execution failed"
   return { isError: true, content: [{ type: "text", text }] }
 }
 
-// MCP tasks: a task-capable client gets a handle at once and collects the result later. Cancelling a task stops its work.
+// The SDK reports tasks/cancel only as a status change, so this is where a cancelled task's work stops.
 class TaskWork extends InMemoryTaskStore {
   readonly work = new Map<string, AbortController>()
   override async updateTaskStatus(taskId: string, status: Task["status"], message?: string, sessionId?: string) {
@@ -107,24 +110,24 @@ class TaskWork extends InMemoryTaskStore {
 }
 
 export function createApp(options: AppOptions) {
-  const { database, platform, adapters } = options
+  // The host's own map, read on each publish and call: an adapter it adds later serves what it publishes after.
+  const { database, platform, adapters: registry } = options
   const limits = withLimits(appLimits, options)
   const store = openStore(database, limits)
-  const registry = new Map(adapters)
-  const adapterIds = new Set(registry.keys())
+  const adapterIds = () => new Set(registry.keys())
   const graphs = createLru<Graph>(limits.graphCacheSize)
   const runCache = createLru<{ run: Run; grants: ReadonlySet<string> }>(256)
   const activeCalls = new Map<string, number>() // run id → tool calls in flight
   const activeRuns = new Map<string, number>() // root run id → runs in flight in its delegation tree
   const lifetimes = new Map<string, AbortController>() // run id → ends everything the run owns
   const delegations = new Map<string, Map<string, Promise<CallToolResult>>>() // run id → its uncollected children
-  const connections = new Map<string, Set<Server>>()
+  const connections = new Map<string, Set<Server>>() // run id → its open MCP connections
 
   function graph(revision: string) {
     let current = graphs.get(revision)
     if (!current) {
-      // Allow historical revisions to load even if an unused adapter was later retired.
-      current = compileGraph(store.revision(revision), adapterIds, false)
+      // Stored revisions skip the adapter check, so retiring an adapter fails only the calls that use it.
+      current = compileGraph(store.revision(revision), adapterIds(), false)
       graphs.set(revision, current)
     }
     return current
@@ -183,7 +186,7 @@ export function createApp(options: AppOptions) {
     }
   }
 
-  // `requireActive` is true for live tool calls and false for reconnects and approvals.
+  // `requireActive` refuses new calls under an ended ancestor; listings and staged approvals still work there.
   function checkAncestors(run: Run, requireActive = false) {
     let parent = run.parent
     while (parent) {
@@ -209,7 +212,7 @@ export function createApp(options: AppOptions) {
     const { input: _raw, ...settings } = request
     const run = freezeRun({ ...settings, id: randomUUID(), parent })
     const current = graph(run.revision)
-    const entry = current.runnableUnit(run.entry)
+    const entry = current.runnableCell(run.entry)
 
     // Cap the depth, and keep denied whatever an ancestor could reach but was denied.
     const deniedByAncestors = new Set<string>()
@@ -223,10 +226,10 @@ export function createApp(options: AppOptions) {
       ancestor = loaded.run.parent
     }
 
-    // Policy is asked only about what this unit can reach, so rules can be scoped to units.
+    // Policy is asked only about what this cell can reach, so rules can be scoped to cells.
     const grants = [...current.staticReachable(entry.id)]
       .filter(id => !deniedByAncestors.has(id) && platform.allowed(run, id))
-    if (!grants.includes(entry.id)) fail("DENIED", "Unit denied: " + entry.id)
+    if (!grants.includes(entry.id)) fail("DENIED", "Cell denied: " + entry.id)
 
     const release = admit(activeRuns, parent ? rootOf(parent.run) : run.id, limits.maxRuns,
       "Too many active runs in this delegation tree")
@@ -257,14 +260,14 @@ export function createApp(options: AppOptions) {
   // A delegated run belongs to the calling run, not to the request: a caller that stops waiting only detaches, and a
   // retry with the same key and arguments joins the child or collects its result.
   async function delegate(
-    run: Run, tool: string, unit: string, args: Args, key: string, signal: AbortSignal, heartbeat?: () => void,
+    run: Run, tool: string, cell: string, args: Args, key: string, signal: AbortSignal, heartbeat?: () => void,
   ): Promise<CallToolResult> {
     const calls = delegations.get(run.id) ?? new Map<string, Promise<CallToolResult>>()
     delegations.set(run.id, calls)
     const slot = hash([tool, key, args])
     let child = calls.get(slot)
     if (!child) {
-      const started = startRun({ owner: run.owner, revision: run.revision, workspace: run.workspace, entry: unit, input: args },
+      const started = startRun({ owner: run.owner, revision: run.revision, workspace: run.workspace, entry: cell, input: args },
         lifetime(run.id), { run: run.id, tool, key })
       started.catch(() => { if (calls.get(slot) === started) calls.delete(slot) }) // a failed child can be retried
       calls.set(slot, (child = started))
@@ -277,7 +280,7 @@ export function createApp(options: AppOptions) {
   async function execute(
     run: Run, node: Binding, args: Args, key: string, signal: AbortSignal, heartbeat?: () => void,
   ): Promise<unknown> {
-    if ("unit" in node.target) return delegate(run, node.id, node.target.unit, args, key, signal, heartbeat)
+    if ("cell" in node.target) return delegate(run, node.id, node.target.cell, args, key, signal, heartbeat)
     const adapter = registry.get(node.target.adapter)
     if (!adapter) fail("UNAVAILABLE", "Adapter unavailable: " + node.target.adapter)
     if ("call" in adapter) return adapter.call(run, args, signal)
@@ -328,7 +331,7 @@ export function createApp(options: AppOptions) {
 
   async function connect(run: Run, channel: Transport, native = false) {
     const tasks = new TaskWork()
-    const server = new Server({ name: "senter-mvp", version: "0.1.0" }, {
+    const server = new Server({ name: "celler", version: "0.1.0" }, {
       capabilities: { tools: { listChanged: true }, tasks: { list: {}, cancel: {}, requests: { tools: { call: {} } } } },
       taskStore: tasks,
     })
@@ -348,12 +351,12 @@ export function createApp(options: AppOptions) {
           jsonBytes += meta.exposedBytes + (tools.length > 1 ? 1 : 0)
         }
       }
-      // Once a connection has moved to discover and invoke it stays there, so the menu never flips back.
+      // Once a connection moves to discover and invoke it stays there, so the model's `invoke` calls keep working.
       if (!invokeAdvertised && (native || jsonBytes <= limits.discoveryBytes)) {
         return { tools: [...tools, discoverTool] }
       }
       invokeAdvertised = true
-      const pins = new Set(current.unit(run.entry).pins)
+      const pins = new Set(current.cell(run.entry).pins)
       return { tools: [...tools.filter(tool => pins.has(tool.name)), discoverTool, invokeTool] }
     }
 
@@ -367,7 +370,7 @@ export function createApp(options: AppOptions) {
       try {
         return list()
       } catch (error) {
-        if (error instanceof SenterError || extra.signal.aborted) throw error
+        if (error instanceof CellerError || extra.signal.aborted) throw error
         fail("UNAVAILABLE", "Tool listing failed") // never pass raw errors across the MCP boundary
       }
     })
@@ -409,7 +412,7 @@ export function createApp(options: AppOptions) {
       void respond(AbortSignal.any([work.signal, connection.signal, ...owned]))
         .catch(refusal)
         .then(async result => {
-          // A cancelled task keeps its cancelled status; anything else stores its result for tasks/result.
+          // A cancelled task keeps its status; any other outcome is stored for tasks/result.
           if (!work.signal.aborted) await extra.taskStore!.storeTaskResult(task.taskId, result.isError ? "failed" : "completed", result)
         })
         .catch(() => {})
@@ -435,7 +438,7 @@ export function createApp(options: AppOptions) {
 
   return {
     publish(config: unknown) {
-      const current = compileGraph(config, adapterIds, true)
+      const current = compileGraph(config, adapterIds(), true)
       const revision = store.saveRevision(current.snapshot)
       graphs.set(revision, current)
       return revision

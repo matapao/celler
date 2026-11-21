@@ -1,3 +1,4 @@
+// A stand-in broker: workspace mode answers fs.read; launch mode plays the harness and calls fs.read over fd 3.
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { Socket } from "node:net"

@@ -1,9 +1,27 @@
 import assert from "node:assert/strict"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
+import { DatabaseSync } from "node:sqlite"
+import { setTimeout as delay } from "node:timers/promises"
+
+/** Waits until `ok()` holds, looking every few milliseconds; fails after `ms`, so a test never hangs. */
+export async function until(ok, ms = 5_000) {
+  const end = Date.now() + ms
+  while (!ok()) {
+    if (Date.now() > end) throw Error("timed out waiting")
+    await delay(5)
+  }
+}
+
+/** A database in memory for one test, closed after it. */
+export function memoryDatabase(t) {
+  const database = new DatabaseSync(":memory:")
+  t.after(() => database.close())
+  return database
+}
 
 export const text = value => ({ content: [{ type: "text", text: value }] })
-export const unit = (id, exports, options = {}) => ({ kind: "unit", id, title: id, profile: id, exports, ...options })
+export const cell = (id, exports, options = {}) => ({ kind: "cell", id, title: id, profile: id, exports, ...options })
 export const object = (properties = {}) => ({
   type: "object", properties, required: Object.keys(properties), additionalProperties: false,
 })
@@ -28,7 +46,7 @@ export async function discover(client, args) {
   if (result.isError) throw Error(result.content[0].text)
   return JSON.parse(result.content[0].text)
 }
-// A tool failure comes back as an isError result the model can read. This checks the result and its message.
+// Tool failures arrive as isError results; only protocol errors reject.
 export async function refused(call, pattern) {
   const result = await call
   assert.equal(result.isError, true, "expected an isError result, got " + JSON.stringify(result))

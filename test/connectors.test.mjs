@@ -1,12 +1,10 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { DatabaseSync } from "node:sqlite"
-import { createApp, readMcp, postJson } from "senter-mvp"
-import { object, request, text, tool, unit, withClient } from "./support.mjs"
+import { createApp, readMcp, postJson } from "celler"
+import { cell, memoryDatabase, object, request, text, tool, withClient } from "./support.mjs"
 
 test("an MCP read preserves the upstream tool name, arguments and structured result", async t => {
-  const database = new DatabaseSync(":memory:")
-  t.after(() => database.close())
+  const database = memoryDatabase(t)
   const upstream = {
     async callTool(call, _schema, { signal }) {
       assert.deepEqual(call, { name: "lookup_original", arguments: { id: "A" } })
@@ -20,7 +18,7 @@ test("an MCP read preserves the upstream tool name, arguments and structured res
       launch: (_run, connect) => withClient(connect, client => client.callTool({ name: "lookup", arguments: { id: "A" } })),
     },
   })
-  const revision = app.publish([unit("root", ["lookup"]), tool("lookup", { adapter: "records" }, {
+  const revision = app.publish([cell("root", ["lookup"]), tool("lookup", { adapter: "records" }, {
     inputSchema: object({ id: { type: "string" } }), outputSchema: object({ ref: { type: "string" } }),
   })])
   assert.deepEqual((await app.start(request(revision))).structuredContent, { ref: "B" })

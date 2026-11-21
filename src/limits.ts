@@ -32,6 +32,25 @@ export const brokerLimits = {
 }
 export const readLimits = { maxBytes: INLINE_LIMIT }
 export const postLimits = { timeoutMs: 30_000, maxResponseBytes: 1024 * 1024 }
+/** The coding agents' harnesses: how long a program is waited for, and how much of what it says is kept. */
+export const harnessLimits = {
+  /** A program asked its version or whether it is signed in. */
+  askMs: 20_000,
+  /** A health check's test run; Codex starts its app-server first. */
+  claudeTestRunMs: 90_000,
+  codexTestRunMs: 180_000,
+  /** A cancelled or finished agent's time to exit before it is stopped, with what it started. */
+  exitGraceMs: 3000,
+  /** A sign-in left open this long is stopped. */
+  loginMs: 15 * 60_000,
+  /** The end of an agent's error output that is kept, and how much of it a run's error carries. */
+  stderrChars: 4000,
+  errorChars: 800,
+  /** A tool call as the person sees it: a command, a search, what a helper is to do. */
+  commandChars: 160,
+  searchChars: 80,
+  helperChars: 200,
+}
 
 const ZERO_ALLOWED = new Set(["discoveryBytes", "maxDepth", "progressIntervalMs"])
 

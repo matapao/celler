@@ -1,34 +1,48 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { DatabaseSync } from "node:sqlite"
-import { setTimeout as delay } from "node:timers/promises"
-import { createApp } from "senter-mvp"
-import { discover, object, refused, request, text, tool, unit, withClient } from "./support.mjs"
+import { createApp } from "celler"
+import { cell, discover, memoryDatabase, object, refused, request, text, tool, until, withClient } from "./support.mjs"
 
 test("publication validates every edge including delegation targets", t => {
-  const database = new DatabaseSync(":memory:")
-  t.after(() => database.close())
+  const database = memoryDatabase(t)
   const app = createApp({ database, adapters: new Map([["ok", { call: async () => text("ok") }]]), platform: {} })
-  assert.throws(() => app.publish([unit("a", ["missing"])]), /Unknown node/)
-  assert.throws(() => app.publish([unit("a", ["b"]), unit("b", ["a"])]), /Cycle/)
-  assert.throws(() => app.publish([unit("a", ["go"]), tool("go", { unit: "a" })]), /Cycle/)
-  assert.throws(() => app.publish([unit("a", [], { pins: ["bogus"] })]), /Invalid pin/)
-  assert.throws(() => app.publish([unit("a", ["t"], { pins: ["t", "t"] }), tool("t", { adapter: "ok" })]), /Duplicate pin/)
+  assert.throws(() => app.publish([cell("a", ["missing"])]), /Unknown node/)
+  assert.throws(() => app.publish([cell("a", ["b"]), cell("b", ["a"])]), /Cycle/)
+  assert.throws(() => app.publish([cell("a", ["go"]), tool("go", { cell: "a" })]), /Cycle/)
+  assert.throws(() => app.publish([cell("a", [], { pins: ["bogus"] })]), /Invalid pin/)
+  assert.throws(() => app.publish([cell("a", ["t"], { pins: ["t", "t"] }), tool("t", { adapter: "ok" })]), /Duplicate pin/)
   assert.throws(() => app.publish([tool("t", { adapter: "absent" })]), /Unknown adapter/)
-  assert.throws(() => app.publish([unit("discover", [])]), /Reserved node ID/)
-  assert.ok(app.publish([unit("a", ["t"]), tool("t", { adapter: "ok" }, { execution: { taskSupport: "required" } })]))
-  // Grouping unit without profile can be exported, but cannot be a delegation target.
-  const group = { kind: "unit", id: "grp", title: "Group", exports: ["t"] }
-  assert.ok(app.publish([unit("a", ["grp"]), group, tool("t", { adapter: "ok" })]))
-  assert.throws(() => app.publish([unit("a", ["go"]), tool("go", { unit: "grp" }), group, tool("t", { adapter: "ok" })]), /launch profile/)
+  // A schema it can't compile is refused by the tool's ID, so a host can leave that one out.
+  const unresolved = { inputSchema: { type: "object", properties: { x: { $ref: "#/nowhere" } } } }
+  assert.throws(() => app.publish([cell("a", ["t"]), tool("t", { adapter: "ok" }, unresolved)]), /Invalid JSON Schema in t:/)
+  assert.throws(() => app.publish([cell("discover", [])]), /Reserved node ID/)
+  assert.ok(app.publish([cell("a", ["t"]), tool("t", { adapter: "ok" }, { execution: { taskSupport: "required" } })]))
+  // A cell without a profile can be exported but not delegated to.
+  const group = { kind: "cell", id: "grp", title: "Group", exports: ["t"] }
+  assert.ok(app.publish([cell("a", ["grp"]), group, tool("t", { adapter: "ok" })]))
+  assert.throws(() => app.publish([cell("a", ["go"]), tool("go", { cell: "grp" }), group, tool("t", { adapter: "ok" })]), /launch profile/)
   // Optional undefined fields are accepted; non-JSON values are rejected.
-  assert.ok(app.publish([unit("a", [], { description: undefined })]))
-  assert.throws(() => app.publish([unit("a", [], { title: NaN })]), /valid JSON/)
+  assert.ok(app.publish([cell("a", [], { description: undefined })]))
+  assert.throws(() => app.publish([cell("a", [], { title: NaN })]), /valid JSON/)
+})
+
+test("adapters are the host's own map, read live: one added after createApp serves what is published after", async t => {
+  const database = memoryDatabase(t)
+  const adapters = new Map()
+  const platform = {
+    allowed: () => true,
+    launch: (_spec, connect) => withClient(connect, client => client.callTool({ name: "late", arguments: {} })),
+  }
+  const app = createApp({ database, adapters, platform })
+  const graph = [cell("desk", ["late"]), tool("late", { adapter: "later" })]
+  assert.throws(() => app.publish(graph), /Unknown adapter/)
+  adapters.set("later", { call: async () => text("here now") })
+  const revision = app.publish(graph)
+  assert.deepEqual(await app.start({ owner: "o", revision, entry: "desk", workspace: "/w", input: null }), text("here now"))
 })
 
 test("discovery, pinned grants and private delegation use the same published graph", async t => {
-  const database = new DatabaseSync(":memory:")
-  t.after(() => database.close())
+  const database = memoryDatabase(t)
   const denied = new Set(["later"])
   const content = [{ type: "text", text: "Private review instructions" }]
   const adapters = new Map([["read", {
@@ -40,9 +54,9 @@ test("discovery, pinned grants and private delegation use the same published gra
     outputSchema: object({ sha256: { type: "string" } }),
   })
   const records = [
-    unit("root", ["left", "right", "review", "later"], { pins: ["inspect"], context: ["Root brief"] }),
-    unit("left", ["inspect"]), unit("right", ["inspect"]), inspect,
-    tool("review", { unit: "expert" }), unit("expert", ["private"], { context: content }),
+    cell("root", ["left", "right", "review", "later"], { pins: ["inspect"], context: ["Root brief"] }),
+    cell("left", ["inspect"]), cell("right", ["inspect"]), inspect,
+    tool("review", { cell: "expert" }), cell("expert", ["private"], { context: content }),
     tool("private", { adapter: "read" }), tool("later", { adapter: "read" }),
   ]
   let app, childId, rootId
@@ -92,8 +106,7 @@ test("discovery, pinned grants and private delegation use the same published gra
 })
 
 test("small matches carry complete definitions and the server checks declared outputs", async t => {
-  const database = new DatabaseSync(":memory:")
-  t.after(() => database.close())
+  const database = memoryDatabase(t)
   const app = createApp({
     database,
     adapters: new Map([["broken", { call: async () => text("missing output") }]]),
@@ -107,15 +120,44 @@ test("small matches carry complete definitions and the server checks declared ou
       }),
     },
   })
-  const revision = app.publish([unit("root", ["sample"]), tool("sample", { adapter: "broken" }, {
+  const revision = app.publish([cell("root", ["sample"]), tool("sample", { adapter: "broken" }, {
     outputSchema: object({ key: { type: "string" } }),
   })])
   await app.start(request(revision))
 })
 
-test("unit-scoped policies, BFS order, pagination, nativeDiscovery, limits, and MCP error sanitization", async t => {
-  const database = new DatabaseSync(":memory:")
-  t.after(() => database.close())
+test("a connection given the menu keeps it when what it may use shrinks, so the model's invoke calls keep working", async t => {
+  const database = memoryDatabase(t)
+  const revoked = new Set()
+  const app = createApp({
+    database,
+    // Both tools listed in full are more than this; the small one alone fits.
+    discoveryBytes: 600,
+    adapters: new Map([["ok", { call: async () => text("ok") }]]),
+    platform: {
+      allowed: (_run, id) => !revoked.has(id),
+      launch: (spec, connect) => withClient(connect, async client => {
+        const names = async c => (await c.listTools()).tools.map(x => x.name)
+        assert.deepEqual(await names(client), ["discover", "invoke"])
+        revoked.add("big")
+        await app.notifyToolsChanged(spec.id)
+        assert.deepEqual(await names(client), ["discover", "invoke"])
+        // A new connection, with the small one only, is given it in full.
+        await withClient((ch, n) => app.reconnect("alice", spec.id, ch, n), async fresh => {
+          assert.deepEqual(await names(fresh), ["small", "discover"])
+        })
+        return text("done")
+      }),
+    },
+  })
+  const revision = app.publish([cell("root", ["small", "big"]),
+    tool("small", { adapter: "ok" }),
+    tool("big", { adapter: "ok" }, { description: "x".repeat(2_000) })])
+  assert.deepEqual(await app.start(request(revision)), text("done"))
+})
+
+test("cell-scoped policies, BFS order, pagination, nativeDiscovery, limits, and MCP error sanitization", async t => {
+  const database = memoryDatabase(t)
   let releaseSlow
   const slowDone = new Promise(resolve => { releaseSlow = resolve })
   const adapters = new Map([
@@ -124,9 +166,9 @@ test("unit-scoped policies, BFS order, pagination, nativeDiscovery, limits, and 
     ["slow", { call: async () => { await slowDone; return text("done") } }],
   ])
   const nodes = [
-    unit("root", ["first", "second", "delegate", "leak", "slowTool"], { pins: ["t1"] }),
-    { kind: "unit", id: "first", title: "First", exports: ["t1", "t2", "t3"] },
-    { kind: "unit", id: "second", title: "Second", exports: ["t4", "t5", "t6"] },
+    cell("root", ["first", "second", "delegate", "leak", "slowTool"], { pins: ["t1"] }),
+    { kind: "cell", id: "first", title: "First", exports: ["t1", "t2", "t3"] },
+    { kind: "cell", id: "second", title: "Second", exports: ["t4", "t5", "t6"] },
     tool("t1", { adapter: "ok" }, {
       description: "alpha", annotations: { readOnlyHint: true },
       inputSchema: { type: "object", properties: { mode: { enum: ["a", "b"] }, opt: { anyOf: [{ type: "string" }, { type: "null" }] } } },
@@ -138,32 +180,29 @@ test("unit-scoped policies, BFS order, pagination, nativeDiscovery, limits, and 
     tool("t6", { adapter: "ok" }, { description: "alpha" }),
     tool("leak", { adapter: "secretFail" }),
     tool("slowTool", { adapter: "slow" }),
-    tool("delegate", { unit: "child" }),
-    unit("child", ["privateTool", "deeper", "t6"]),
+    tool("delegate", { cell: "child" }),
+    cell("child", ["privateTool", "deeper", "t6"]),
     tool("privateTool", { adapter: "ok" }),
-    tool("deeper", { unit: "grandchild" }),
-    unit("grandchild", ["t1"]),
+    tool("deeper", { cell: "grandchild" }),
+    cell("grandchild", ["t1"]),
   ]
-  const revokable = new Set()
   let app
   const platform = {
-    // Unit-scoped policy: privateTool is ONLY allowed inside `child`; t6 is denied at root start.
     allowed: (run, id) => {
-      if (revokable.has(id)) return false
       if (id === "t6" && run.entry === "root") return false
       if (id === "privateTool") return run.entry === "child"
       return true
     },
     launch: (spec, connect) => withClient(connect, async client => {
       if (spec.entry === "child") {
-        // privateTool works under unit-scoped policy, while t6 stays monotonically denied from root!
+        // Policy allows both here, but root could reach t6 and was denied it.
         assert.deepEqual(await client.callTool({ name: "invoke", arguments: { name: "privateTool" } }), text("ok"))
         await refused(client.callTool({ name: "invoke", arguments: { name: "t6" } }), /outside/)
         // maxDepth = 1 rejects grandchild delegation.
         await refused(client.callTool({ name: "invoke", arguments: { name: "deeper" } }), /depth/)
         return text("child-ok")
       }
-      // Compact card preserves annotations and richer field types (enum / anyOf), and pagination works in BFS order.
+      // With discoveryBytes = 0, results are compact cards, five a page, in BFS order.
       const page1 = await discover(client, { query: "alpha" })
       assert.deepEqual(page1.items.map(x => x.id), ["t1", "t2", "t3", "t4", "t5"])
       assert.equal(page1.next, null) // t6 was denied
@@ -172,31 +211,25 @@ test("unit-scoped policies, BFS order, pagination, nativeDiscovery, limits, and 
         { name: "mode", type: "enum", required: false },
         { name: "opt", type: "string|null", required: false },
       ])
-      // Duplicate refs are deduplicated; oversized query and invalid call-id are rejected.
       const deduped = await discover(client, { refs: ["t1", "t1"] })
       assert.equal(deduped.length, 1)
       await assert.rejects(discover(client, { query: "x".repeat(300) }))
-      await assert.rejects(client.callTool({ name: "t1", arguments: {}, _meta: { "senter/call-id": "" } }), /call-id/)
-      // Internal adapter errors do NOT leak secrets across MCP.
+      await assert.rejects(client.callTool({ name: "t1", arguments: {}, _meta: { "celler/call-id": "" } }), /call-id/)
+      // A raw adapter error never reaches the harness.
       const leaked = await refused(client.callTool({ name: "invoke", arguments: { name: "leak" } }), /Tool execution failed/)
       assert.ok(!/supersecret/.test(JSON.stringify(leaked)))
-      // Concurrency cap (maxConcurrency = 1) rejects a second parallel call.
+      // maxConcurrency = 1 refuses a second call while slowTool runs.
       const firstSlow = client.callTool({ name: "invoke", arguments: { name: "slowTool" } })
       await refused(client.callTool({ name: "t1", arguments: {} }), /concurrent/)
       releaseSlow()
       await firstSlow
-      // Native discovery exposes all tools directly even when discoveryBytes = 0.
+      // Native discovery lists every tool directly, even with discoveryBytes = 0.
       await withClient((ch, n) => app.reconnect("alice", spec.id, ch, n), async nativeClient => {
         const names = (await nativeClient.listTools()).tools.map(x => x.name)
         assert.ok(names.includes("t5") && !names.includes("invoke"))
         // BFS order puts first's exports before second's exports.
         assert.ok(names.indexOf("t1") < names.indexOf("t4"))
       }, true)
-      // Once invoke is advertised, revoking tools never flips the connection out of invoke mode.
-      await app.notifyToolsChanged(spec.id)
-      revokable.add("t2")
-      assert.ok((await client.listTools()).tools.some(x => x.name === "invoke"))
-      // Delegation into child succeeds.
       return client.callTool({ name: "invoke", arguments: { name: "delegate" } })
     }),
   }
@@ -220,8 +253,7 @@ test("unit-scoped policies, BFS order, pagination, nativeDiscovery, limits, and 
 })
 
 test("a delegation retry joins its running child, the tree has a run cap, and ending a run stops the tree", async t => {
-  const database = new DatabaseSync(":memory:")
-  t.after(() => database.close())
+  const database = memoryDatabase(t)
   let launches = 0, rootId, childId, releaseChild
   const childGate = new Promise(resolve => { releaseChild = resolve })
   const untilAborted = signal => new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason)))
@@ -255,13 +287,13 @@ test("a delegation retry joins its running child, the tree has a run cap, and en
   }
   const app = createApp({ database, platform, adapters: new Map(), discoveryBytes: 0, maxRuns: 2 })
   const revision = app.publish([
-    unit("root", ["work"]), tool("work", { unit: "worker" }, { inputSchema: object({ task: { type: "string" } }) }), unit("worker", []),
+    cell("root", ["work"]), tool("work", { cell: "worker" }, { inputSchema: object({ task: { type: "string" } }) }), cell("worker", []),
   ])
   assert.deepEqual(await app.start(request(revision)), text("root done"))
 
   childId = undefined
   const ending = app.start({ ...request(revision), input: "end-me" })
-  while (!childId) await delay(5)
+  await until(() => childId)
   assert.throws(() => app.end("bob", rootId), /Unknown run/)
   // A process that knows the tree only from the database, as after a restart, still ends all of it.
   const ended = id => app.history("alice", id).find(event => event.kind === "ended")
@@ -273,10 +305,56 @@ test("a delegation retry joins its running child, the tree has a run cap, and en
   assert.deepEqual(ended(rootId).detail, { status: "cancelled", by: "host" })
 })
 
+test("a delegated run is checked up its chain at each call: the parent's way to it revoked, the child's next call is refused", async t => {
+  const database = memoryDatabase(t)
+  let revoked = false
+  const app = createApp({
+    database,
+    adapters: new Map([["ok", { call: async () => text("ok") }]]),
+    platform: {
+      // The root's delegation to the child, revoked while the child is at work.
+      allowed: (run, id) => !(revoked && run.entry === "root" && id === "ask"),
+      launch: (spec, connect) => withClient(connect, async client => {
+        if (spec.entry === "root") return client.callTool({ name: "ask", arguments: {} })
+        assert.deepEqual(await client.callTool({ name: "look", arguments: {} }), text("ok"))
+        revoked = true
+        await refused(client.callTool({ name: "look", arguments: {} }), /Delegation revoked/)
+        return text("child done")
+      }, true),
+    },
+  })
+  const revision = app.publish([cell("root", ["ask"]), tool("ask", { cell: "child" }), cell("child", ["look"]), tool("look", { adapter: "ok" })])
+  assert.deepEqual(await app.start(request(revision)), text("child done"))
+})
+
+test("a policy that throws reaches the agent only in celler's words, while listing or calling", async t => {
+  const database = memoryDatabase(t)
+  let broken = false
+  const app = createApp({
+    database,
+    adapters: new Map([["ok", { call: async () => text("ok") }]]),
+    platform: {
+      allowed: () => {
+        if (broken) throw Error("postgres://user:supersecret@10.0.0.5/db")
+        return true
+      },
+      launch: (_spec, connect) => withClient(connect, async client => {
+        assert.ok((await client.listTools()).tools.some(x => x.name === "look"))
+        broken = true
+        const heard = await client.callTool({ name: "look", arguments: {} })
+        assert.deepEqual(heard, { isError: true, content: [{ type: "text", text: "Tool execution failed" }] })
+        await assert.rejects(client.listTools(), error => /Tool listing failed/.test(error.message) && !/supersecret|10\.0\.0\.5/.test(error.message))
+        return text("done")
+      }, true),
+    },
+  })
+  const revision = app.publish([cell("root", ["look"]), tool("look", { adapter: "ok" })])
+  assert.deepEqual(await app.start(request(revision)), text("done"))
+})
+
 test("draft-07 schemas publish, the url format stays linear, and a call asks the policy only about its chain", async t => {
-  const database = new DatabaseSync(":memory:")
-  t.after(() => database.close())
-  const groups = Array.from({ length: 20 }, (_, g) => unit("g" + g, Array.from({ length: 20 }, (_, i) => `t${g}_${i}`)))
+  const database = memoryDatabase(t)
+  const groups = Array.from({ length: 20 }, (_, g) => cell("g" + g, Array.from({ length: 20 }, (_, i) => `t${g}_${i}`)))
   let asked = 0
   const app = createApp({ database, discoveryBytes: 0, adapters: new Map([["ok", { call: async () => text("ok") }]]),
     platform: {
@@ -300,6 +378,6 @@ test("draft-07 schemas publish, the url format stays linear, and a call asks the
     properties: { q: { type: "string" }, link: { type: "string", format: "url" } },
   } })
   const tools = groups.flatMap(group => group.exports.map(id => tool(id, { adapter: "ok" })))
-  const revision = app.publish([unit("root", ["legacy", ...groups.map(group => group.id)]), legacy, ...groups, ...tools])
+  const revision = app.publish([cell("root", ["legacy", ...groups.map(group => group.id)]), legacy, ...groups, ...tools])
   assert.deepEqual(await app.start(request(revision)), text("done"))
 })

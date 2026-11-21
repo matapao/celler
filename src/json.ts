@@ -19,6 +19,7 @@ export function normalizeJson(value: unknown, seen = new Set<object>()): JsonVal
     const out: Record<string, JsonValue> = {}
     for (const [key, item] of Object.entries(value)) {
       if (item === undefined) continue
+      // Not `out[key] = …`: that would turn a `__proto__` key into the prototype.
       Object.defineProperty(out, key, {
         value: normalizeJson(item, seen), enumerable: true, writable: true, configurable: true,
       })

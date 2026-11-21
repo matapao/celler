@@ -7,12 +7,12 @@ import { fail } from "./errors.js"
 import { canonicalJson, normalizeJson, type JsonValue } from "./json.js"
 
 const id = z.string().regex(/^[A-Za-z0-9_.-]{1,128}$/)
-const unitSchema = z.strictObject({
-  kind: z.literal("unit"),
+const cellSchema = z.strictObject({
+  kind: z.literal("cell"),
   id,
   title: z.string(),
   description: z.string().default(""),
-  // A unit without a profile only groups nodes: it can be exported and browsed, never launched.
+  // A cell without a profile only groups nodes: it can be exported and browsed, never launched.
   profile: id.optional(),
   context: z.array(z.union([z.string(), ContentBlockSchema])).default([]),
   exports: z.array(id),
@@ -23,17 +23,17 @@ const bindingSchema = z.strictObject({
   id,
   // The exposed tool name is always the node id, so `name` is optional here and only searched.
   definition: ToolSchema.extend({ name: z.string().optional() }).passthrough(),
-  target: z.union([z.strictObject({ unit: id }), z.strictObject({ adapter: id })]),
+  target: z.union([z.strictObject({ cell: id }), z.strictObject({ adapter: id })]),
 })
-const graphSchema = z.array(z.discriminatedUnion("kind", [unitSchema, bindingSchema]))
+const graphSchema = z.array(z.discriminatedUnion("kind", [cellSchema, bindingSchema]))
 
 export type NodeConfig = z.input<typeof graphSchema>[number]
-export type Unit = z.output<typeof unitSchema>
-export type RunnableUnit = Unit & { profile: string }
+export type Cell = z.output<typeof cellSchema>
+export type RunnableCell = Cell & { profile: string }
 export type Binding = z.output<typeof bindingSchema>
 export type FieldSummary = { name: string; type: string; required: boolean }
 export type NodeMeta =
-  | { kind: "unit"; id: string; title: string; description: string; searchNames: string }
+  | { kind: "cell"; id: string; title: string; description: string; searchNames: string }
   | {
       kind: "tool"
       id: string
@@ -76,7 +76,7 @@ function searchableFields(schema: Tool["inputSchema"]): string {
   }).join(" ")
 }
 
-// Any call can run as an MCP task, so tools say so unless their definition decides otherwise.
+// Every call can run as an MCP task, so tools default to `taskSupport: "optional"`.
 export function exposedTool(binding: Binding): Tool {
   return { ...binding.definition, name: binding.id, execution: { taskSupport: "optional", ...binding.definition.execution } }
 }
@@ -95,7 +95,7 @@ function createValidators() {
 }
 let validators = createValidators()
 
-function validator(schema: Tool["inputSchema"]): ValidateFunction {
+function validator(schema: Tool["inputSchema"], nodeId: string): ValidateFunction {
   const text = canonicalJson(schema)
   const known = validators.compiled.get(text)
   if (known) return known
@@ -107,7 +107,7 @@ function validator(schema: Tool["inputSchema"]): ValidateFunction {
   try {
     check = ajv.compile(body)
   } catch (error) {
-    fail("INVALID_CONFIG", "Invalid JSON Schema: " + (error instanceof Error ? error.message : String(error)))
+    fail("INVALID_CONFIG", `Invalid JSON Schema in ${nodeId}: ` + (error instanceof Error ? error.message : String(error)))
   }
   if ("$async" in check) fail("INVALID_CONFIG", "Expected a synchronous JSON Schema")
   validators.compiled.set(text, check)
@@ -128,27 +128,27 @@ export function compileGraph(config: unknown, adapters: ReadonlySet<string>, val
     if (!node) fail("INVALID_CONFIG", "Unknown node: " + nodeId)
     return node
   }
-  function unit(nodeId: string): Unit {
+  function cell(nodeId: string): Cell {
     const node = get(nodeId)
-    if (node.kind !== "unit") fail("INVALID_CONFIG", "Expected a unit: " + nodeId)
+    if (node.kind !== "cell") fail("INVALID_CONFIG", "Expected a cell: " + nodeId)
     return node
   }
-  function runnableUnit(nodeId: string): RunnableUnit {
-    const node = unit(nodeId)
-    if (!node.profile) fail("INVALID_CONFIG", "Unit has no launch profile: " + nodeId)
-    return node as RunnableUnit
+  function runnableCell(nodeId: string): RunnableCell {
+    const node = cell(nodeId)
+    if (!node.profile) fail("INVALID_CONFIG", "Cell has no launch profile: " + nodeId)
+    return node as RunnableCell
   }
 
   const inputs = new Map<string, ValidateFunction>()
   const outputs = new Map<string, ValidateFunction>()
   const metadata = new Map<string, NodeMeta>()
   const edges = new Map<string, string[]>()
-  const exporters = new Map<string, string[]>() // node id → the units that export it
+  const exporters = new Map<string, string[]>() // node id → the cells that export it
   const incoming = new Map(rows.map(node => [node.id, 0]))
 
   for (const node of rows) {
     let links: string[] = []
-    if (node.kind === "unit") {
+    if (node.kind === "cell") {
       links = node.exports
       if (new Set(links).size !== links.length) fail("INVALID_CONFIG", "Duplicate export in " + node.id)
       if (new Set(node.pins).size !== node.pins.length) fail("INVALID_CONFIG", "Duplicate pin in " + node.id)
@@ -158,13 +158,13 @@ export function compileGraph(config: unknown, adapters: ReadonlySet<string>, val
         else exporters.set(link, [node.id])
       }
       metadata.set(node.id, {
-        kind: "unit", id: node.id, title: node.title, description: node.description,
+        kind: "cell", id: node.id, title: node.title, description: node.description,
         searchNames: [node.id, node.title, node.description].join(" ").toLowerCase(),
       })
     } else {
-      inputs.set(node.id, validator(node.definition.inputSchema))
-      if (node.definition.outputSchema) outputs.set(node.id, validator(node.definition.outputSchema))
-      if ("unit" in node.target) links = [runnableUnit(node.target.unit).id]
+      inputs.set(node.id, validator(node.definition.inputSchema, node.id))
+      if (node.definition.outputSchema) outputs.set(node.id, validator(node.definition.outputSchema, node.id))
+      if ("cell" in node.target) links = [runnableCell(node.target.cell).id]
       else if (validateAdapters && !adapters.has(node.target.adapter)) {
         fail("INVALID_CONFIG", "Unknown adapter: " + node.target.adapter)
       }
@@ -204,17 +204,17 @@ export function compileGraph(config: unknown, adapters: ReadonlySet<string>, val
   }
   if (visited !== rows.length) fail("INVALID_CONFIG", "Cycle through exports or delegation")
 
-  // Everything an entry can browse, each node with the units that export it. BFS keeps declared export order
+  // Everything an entry can browse, each node with the cells that export it. BFS keeps declared export order
   // and asks `allowed` at most once per node.
   function view(entry: string, allowed: (id: string) => boolean) {
-    unit(entry)
-    if (!allowed(entry)) fail("DENIED", "Unit denied: " + entry)
+    cell(entry)
+    if (!allowed(entry)) fail("DENIED", "Cell denied: " + entry)
     const parents = new Map<string, Set<string>>([[entry, new Set()]])
     const denied = new Set<string>()
     const todo = [entry]
     for (let i = 0; i < todo.length; i++) {
       const parent = todo[i]
-      for (const childId of unit(parent).exports) {
+      for (const childId of cell(parent).exports) {
         const seen = parents.get(childId)
         if (seen) {
           seen.add(parent)
@@ -226,8 +226,8 @@ export function compileGraph(config: unknown, adapters: ReadonlySet<string>, val
           continue
         }
         parents.set(childId, new Set([parent]))
-        // Only exports are browsable. Entering a delegated unit requires a tool call.
-        if (get(childId).kind === "unit") todo.push(childId)
+        // Only exports are browsable. Entering a delegated cell requires a tool call.
+        if (get(childId).kind === "cell") todo.push(childId)
       }
     }
     return parents
@@ -252,7 +252,7 @@ export function compileGraph(config: unknown, adapters: ReadonlySet<string>, val
   }
 
   for (const node of rows) {
-    if (node.kind !== "unit" || !node.pins.length) continue
+    if (node.kind !== "cell" || !node.pins.length) continue
     const reachable = staticReachable(node.id)
     for (const pin of node.pins) {
       if (!reachable.has(pin) || get(pin).kind !== "tool") fail("INVALID_CONFIG", "Invalid pin: " + pin)
@@ -276,7 +276,7 @@ export function compileGraph(config: unknown, adapters: ReadonlySet<string>, val
     if (check && !check(value)) fail("INVALID_OUTPUT", "Invalid structured output for " + nodeId)
   }
 
-  return { snapshot, get, unit, runnableUnit, meta, view, reaches, staticReachable, validateInput, validateOutput }
+  return { snapshot, get, cell, runnableCell, meta, view, reaches, staticReachable, validateInput, validateOutput }
 }
 
 export type Graph = ReturnType<typeof compileGraph>

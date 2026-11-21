@@ -5,7 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolResultSchema, type Tool } from "@modelcontextprotocol/sdk/types.js"
 import type { Adapter, Platform } from "./app.js"
 import type { NodeConfig } from "./catalog.js"
-import { fail, SenterError } from "./errors.js"
+import { fail, CellerError } from "./errors.js"
 import { brokerLimits, withLimits } from "./limits.js"
 
 export type BrokerCommand = {
@@ -121,11 +121,11 @@ export function createBroker(command: BrokerCommand, allowed: Platform["allowed"
     try {
       const running = (child = spawn(command.executable, [...command.args ?? [], mode], {
         stdio: connect ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
-        env: command.env ?? {},
+        env: command.env ?? {}, // never inherits the host's environment
         signal,
         shell: false,
       }))
-      // Never inherit untrusted stderr directly to host stdout/stderr; drain so the child cannot block.
+      // Untrusted stderr never reaches the host's own streams; draining it keeps the child from blocking.
       if (command.onStderr) running.stderr!.on("data", command.onStderr)
       else running.stderr!.resume()
 
@@ -135,10 +135,10 @@ export function createBroker(command: BrokerCommand, allowed: Platform["allowed"
         running.once("error", reject)
         running.once("close", (code, sig) => {
           if (code === 0) resolve()
-          else reject(new SenterError("BROKER_ERROR", `Broker exited with ${sig ? "signal " + sig : "code " + code}`))
+          else reject(new CellerError("BROKER_ERROR", `Broker exited with ${sig ? "signal " + sig : "code " + code}`))
         })
       })
-      exit.catch(() => {})
+      exit.catch(() => {}) // a throw before `await exit` must not leave it unhandled
 
       if (connect && transport) await connect(transport, nativeDiscovery)
       const writeStdin = pipeline(Readable.from([body]), running.stdin!).catch(async (error: NodeJS.ErrnoException) => {
@@ -195,9 +195,9 @@ export function createBroker(command: BrokerCommand, allowed: Platform["allowed"
     bindings.push({ kind: "tool", id, target: { adapter: id }, definition: { description, annotations, inputSchema } })
   }
 
-  // A grouping unit: no profile, so it can be exported and browsed but never launched.
+  // No profile: it only groups the tools.
   const workspaceNodes: NodeConfig[] = [
-    { kind: "unit", id: "files", title: "Workspace files", exports: bindings.map(node => node.id) },
+    { kind: "cell", id: "files", title: "Workspace files", exports: bindings.map(node => node.id) },
     ...bindings,
   ]
   return { platform, adapters, workspaceNodes }

@@ -17,15 +17,15 @@ export type ErrorCode =
   | "BROKER_ERROR"
 
 /** An expected failure. Its message is safe to show the harness; any other error reaches it only as "Tool execution failed". */
-export class SenterError extends Error {
+export class CellerError extends Error {
   constructor(readonly code: ErrorCode, message: string) {
     super(message)
-    this.name = "SenterError"
+    this.name = "CellerError"
   }
 }
 
 export function fail(code: ErrorCode, message: string): never {
-  throw new SenterError(code, message)
+  throw new CellerError(code, message)
 }
 
 /** Parses with a schema. A mismatch becomes an INVALID_ARGS error whose message says what to fix. */

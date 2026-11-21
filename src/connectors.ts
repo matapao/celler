@@ -83,7 +83,7 @@ export function postJson(
       const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
       const response = await fetch(endpoint, {
         method: "POST",
-        redirect: "error",
+        redirect: "error", // a redirect would deliver somewhere the person did not approve
         signal: combined,
         headers: { Authorization: "Bearer " + secret, "Content-Type": "application/json", "Idempotency-Key": key },
         body: JSON.stringify(write.content),

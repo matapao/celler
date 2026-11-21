@@ -1,7 +1,8 @@
+// Stages two approvals, then exits mid-send of the first (code 49), as a crash would.
 import { DatabaseSync } from "node:sqlite"
 import { setTimeout as delay } from "node:timers/promises"
-import { createApp } from "senter-mvp"
-import { object, request, tool, unit, withClient } from "../support.mjs"
+import { createApp } from "celler"
+import { object, request, tool, cell, withClient } from "../support.mjs"
 
 const database = new DatabaseSync(process.argv[2])
 const app = createApp({
@@ -21,7 +22,7 @@ const app = createApp({
     }),
   },
 })
-const revision = app.publish([unit("root", ["send"]), tool("send", { adapter: "delivery" }, {
+const revision = app.publish([cell("root", ["send"]), tool("send", { adapter: "delivery" }, {
   inputSchema: object({ message: { type: "string" } }),
 })])
 await app.start(request(revision))
