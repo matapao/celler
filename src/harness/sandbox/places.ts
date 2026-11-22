@@ -1,9 +1,10 @@
-// Where a run's commands may go, as the settings files beside this one name them for each harness on each system
-// (claude.*.ts, codex.*.ts): the run's folder, with its own scratch folder inside it, the programs on its PATH, and what
-// they must never read or write. Worked out once, as the run starts; the settings files only put these into each
-// harness's own words.
+// Where a run's commands may go, which the settings files beside this one put into each harness's own words
+// (claude.*.ts, codex.*.ts): the run's folder, with its own scratch folder inside it, and none of the person's home or
+// the system's temporary folders. celler keeps no list of where secrets might be: the home is closed as a whole, and
+// PATH, which declares the person's programs, is what opens their folders in it again. These are facts about the run,
+// worked out once as it starts.
 
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmdirSync, statSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmdirSync, statSync } from "node:fs"
 import { chmod, readdir, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -20,139 +21,38 @@ export interface Places {
   scratch: { root: string; tmp: string; home: string; cache: string; short: string }
   /** The system's temporary folders, which other programs share: never read or written. */
   temps: string[]
-  /** The person's home folder: never read. */
+  /** The person's home folder, where the host keeps its data too: never read, but for the run's folder if it is in it. */
   home: string
-  /** The host's own data: never read. */
-  data: string | null
-  /** The programs on its PATH, and where they are installed (never the home folder or the root itself): read only. */
-  toolchain: string[]
+  /** The folders on PATH inside the person's home, as PATH declares them: their programs run. */
+  tools: string[]
   /** What the host adds, read only: a worktree's repository data. */
   readable: string[]
-  /** Files in the folder named for secrets: never read, by its commands or its own file tools. */
-  secrets: string[]
-  /** Variables in the agent's environment its commands must never see: the connectors' values. */
+  /** Variables in the agent's environment its commands must never see: the proxies'. */
   hidden: string[]
 }
 
 /**
- * Names kept for secrets: closed to a run's commands and to its agent's file tools wherever they are in its folder, as
- * patterns its agents' settings take (`*` within a name).
- */
-export const SECRET_NAMES = [
-  ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa", "id_rsa.*", "id_ecdsa", "id_ecdsa.*", "id_ed25519",
-  "id_ed25519.*", ".npmrc", ".netrc", ".pypirc", ".git-credentials",
-]
-
-/**
  * A folder's own settings for the agents celler runs, which they load from it and may start programs from outside any
  * sandbox (a Codex MCP server in `.codex/config.toml`, a Claude Code hook): never written by a run's commands, wherever
- * they are in its folder, so one run can't set up what the next, or the person's own agent, starts. Codex's sandbox
- * takes such patterns only to deny, so its commands don't read them either.
+ * they are in its folder, so a run can't set up what the person's own agent starts there. Codex's sandbox takes such
+ * patterns only to deny, so its commands don't read them either.
  */
 export const AGENT_SETTINGS = [".codex", ".agents", ".claude", ".mcp.json"]
-
-/** Folders a search for secret files doesn't go into: what tools fetch and make, and the repository's own data. */
-const NOT_SEARCHED = new Set(["node_modules", ".git", ".desks", ".celler", "vendor", "dist", "build", ".venv", "venv", "__pycache__"])
-/** How much of a folder is looked through for secret files at most, and how deep. */
-const MAX_LOOKED_AT = 20_000
-const MAX_DEPTH = 8
-
-const asPattern = (name: string) => new RegExp(`^${name.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`)
-const SECRET_PATTERNS = SECRET_NAMES.map(asPattern)
-export const isSecretName = (name: string) => SECRET_PATTERNS.some((p) => p.test(name))
-
-/** The files in a folder named for secrets, as they are when the run starts. */
-export function secretsIn(folder: string): string[] {
-  const found: string[] = []
-  let looked = 0
-  const walk = (dir: string, depth: number) => {
-    if (depth > MAX_DEPTH || looked > MAX_LOOKED_AT) return
-    let entries: import("node:fs").Dirent[]
-    try {
-      entries = readdirSync(dir, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const entry of entries) {
-      if (++looked > MAX_LOOKED_AT) return
-      const at = path.join(dir, entry.name)
-      if (entry.isDirectory()) {
-        if (!NOT_SEARCHED.has(entry.name)) walk(at, depth + 1)
-      } else if (isSecretName(entry.name)) found.push(at)
-    }
-  }
-  walk(folder, 0)
-  return found
-}
-
-/**
- * The programs on a PATH, as folders to read, by their real paths: each folder on it that is there, and where its
- * programs are installed. That is the folder above a `bin` (`~/.nvm/versions/node/v24` for its `bin`), and for a folder
- * in the person's home, the folders its programs link to (`~/.local/bin/ruff` to `~/.local/share/uv/tools/ruff/bin/ruff`
- * is `~/.local/share/uv/tools/ruff`). Never the root or a folder that is or holds the person's home or the host's data,
- * and never a folder right inside the home folder (`~/.local`, `~/.cargo`): those hold more than programs.
- */
-export function toolchainOf(pathVariable: string, home: string, data: string | null = null): string[] {
-  const homeFolder = realOr(home)
-  const dataFolder = data ? realOr(data) : null
-  const root = path.parse(homeFolder).root
-  const closed = (dir: string) => dir === root || inside(dir, homeFolder) || (dataFolder !== null && inside(dir, dataFolder))
-  const isInstall = (dir: string) => !closed(dir) && path.dirname(dir) !== homeFolder
-  const out = new Set<string>()
-  for (const entry of pathVariable.split(path.delimiter)) {
-    const dir = path.isAbsolute(entry) ? realFolder(entry) : null
-    if (!dir || closed(dir) || out.has(dir)) continue
-    out.add(dir)
-    const linked = inside(homeFolder, dir) ? linkedFrom(dir).map((program) => path.dirname(program)) : []
-    for (const folder of [dir, ...linked]) {
-      const installed = installFolder(folder)
-      if (isInstall(installed)) out.add(installed)
-    }
-  }
-  return [...out]
-}
-
-const realOr = (place: string) => realFolder(place) ?? path.resolve(place)
-
-/** A folder by its real path, or null when there is none. */
-function realFolder(dir: string): string | null {
-  try {
-    const real = realpathSync(dir)
-    return statSync(real).isDirectory() ? real : null
-  } catch {
-    return null
-  }
-}
-
-/** Where the programs that are links in a folder really are; a broken link is passed over. */
-function linkedFrom(dir: string): string[] {
-  let entries: import("node:fs").Dirent[]
-  try {
-    entries = readdirSync(dir, { withFileTypes: true })
-  } catch {
-    return []
-  }
-  const programs: string[] = []
-  for (const entry of entries) {
-    if (!entry.isSymbolicLink()) continue
-    try {
-      programs.push(realpathSync(path.join(dir, entry.name)))
-    } catch {
-      // A broken link.
-    }
-  }
-  return programs
-}
-
-/** The folder its programs are installed in: the one above a `bin`, else the folder itself. */
-function installFolder(folder: string): string {
-  return /^s?bin$/i.test(path.basename(folder)) ? path.dirname(folder) : folder
-}
 
 /** Whether a path is a folder itself or inside it. */
 export function inside(folder: string, file: string): boolean {
   const rel = path.relative(folder, file)
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))
+}
+
+/** Whether a path is outside a folder, as named or as the folder really is (macOS's /tmp). */
+export function outside(file: string, folder: string): boolean {
+  const out = (dir: string) => !inside(dir, path.resolve(dir, file))
+  try {
+    return out(path.resolve(folder)) && out(realpathSync(folder))
+  } catch {
+    return true
+  }
 }
 
 /** Where in its folder a run's scratch folders are made, each its own: `<folder>/.celler/run-…`. */
@@ -212,35 +112,50 @@ async function makeWritable(dir: string): Promise<void> {
   }
 }
 
+/** A folder by its real path, or null when there is none. */
+function realFolder(dir: string): string | null {
+  try {
+    const real = realpathSync(dir)
+    return statSync(real).isDirectory() ? real : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * The system's temporary folders, as they really are: macOS's /tmp is a link to /private/tmp, and a link closed itself
- * would close every path through it, even to a folder opened again inside (a harness's own temporary folder).
+ * would close every path through it, even to a folder opened again inside (the run's short folder).
  */
 export function systemTemps(): string[] {
   const named = process.platform === "win32" ? [os.tmpdir()] : [os.tmpdir(), "/tmp", "/var/tmp"]
   const out = new Set<string>()
   for (const dir of named) {
-    try {
-      out.add(realpathSync(dir))
-    } catch {
-      // Not on this computer.
-    }
+    const real = realFolder(dir)
+    if (real) out.add(real)
   }
   return [...out]
 }
 
-/** A run's places, as it starts: its folder and the scratch in it, the person's PATH, what the host adds and hides. */
-export function placesFor(o: { folder: string; scratch: Places["scratch"]; data?: string; pathVariable: string; readable?: string[]; hidden: string[] }): Places {
-  const home = os.homedir()
+/** The folders on a PATH that are inside the home, by their real paths: never the home itself. */
+export function homeTools(pathVariable: string, home: string): string[] {
+  const out = new Set<string>()
+  for (const entry of pathVariable.split(path.delimiter)) {
+    const dir = path.isAbsolute(entry) ? realFolder(entry) : null
+    if (dir && dir !== home && inside(home, dir)) out.add(dir)
+  }
+  return [...out]
+}
+
+/** A run's places, as it starts: its folder and the scratch in it, what the host adds and hides. */
+export function placesFor(o: { folder: string; scratch: Places["scratch"]; readable?: string[]; hidden: string[] }): Places {
+  const home = realFolder(os.homedir()) ?? path.resolve(os.homedir())
   return {
     folder: path.resolve(o.folder),
     scratch: o.scratch,
     temps: systemTemps(),
     home,
-    data: o.data ? path.resolve(o.data) : null,
-    toolchain: toolchainOf(o.pathVariable, home, o.data ?? null),
+    tools: homeTools(process.env.PATH ?? "", home),
     readable: (o.readable ?? []).map((p) => path.resolve(p)),
-    secrets: secretsIn(o.folder),
     hidden: o.hidden,
   }
 }

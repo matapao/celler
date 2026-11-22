@@ -1,0 +1,5 @@
+# The agent SDKs' bundled copies of Claude Code and Codex: celler runs the person's own (harness/programs.ts), so none is
+# installed.
+ignoredOptionalDependencies:
+  - "@anthropic-ai/claude-agent-sdk-*"
+  - "@openai/codex-*"

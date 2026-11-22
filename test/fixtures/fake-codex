@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+// A stand-in for Codex as the Codex SDK drives it (`codex exec --experimental-json`): no model is called. It says what
+// it was started with and given in FAKE_CODEX_LOG, and answers with Codex's own events: its thread, a command it ran,
+// a file it wrote, its reply and its usage. With FAKE_CODEX_TOOL, it first calls that tool on the MCP server in its
+// settings, each header's value from the variable the header names, and its reply ends with the tool's answer.
+import { appendFileSync } from "node:fs"
+import path from "node:path"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
+
+const args = process.argv.slice(2)
+if (args[0] === "--version") {
+  console.log("codex-cli 0.171.0")
+  process.exit(0)
+}
+if (args[0] === "login") {
+  console.log(process.env.FAKE_CODEX_SIGNED_OUT ? "Not logged in" : "Logged in using ChatGPT")
+  process.exit(process.env.FAKE_CODEX_SIGNED_OUT ? 1 : 0)
+}
+
+const all = (name) => args.flatMap((a, i) => (a === name ? [args[i + 1]] : []))
+const one = (name) => all(name)[0]
+const configs = all("--config")
+const resume = args.includes("resume") ? args[args.indexOf("resume") + 1] : null
+const cwd = one("--cd") ?? process.cwd()
+const logFile = process.env.FAKE_CODEX_LOG ?? path.join(cwd, "agent.jsonl")
+const log = (what, data) => appendFileSync(logFile, JSON.stringify({ what, data }) + "\n")
+const send = (event) => process.stdout.write(JSON.stringify(event) + "\n")
+
+let prompt = ""
+for await (const chunk of process.stdin) prompt += chunk
+log("exec", { args, configs, model: one("--model") ?? null, cwd, resume, images: all("--image"), prompt, env: Object.keys(process.env).sort(), values: Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("CELLER_VALUE_"))), mark: process.env.HOST_RUN ?? null, home: process.env.CODEX_HOME ?? null })
+
+if (resume === "missing") {
+  console.error(`Error: thread/resume: thread/resume failed: no rollout found for thread id ${resume} (code -32600)`)
+  process.exit(1)
+}
+send({ type: "thread.started", thread_id: resume ?? "fake-thread" })
+send({ type: "turn.started" })
+if (process.env.FAKE_CODEX_SIGNED_OUT) {
+  send({ type: "error", message: "Reconnecting... 1/5 (unexpected status 401 Unauthorized: Missing bearer or basic authentication in header)" })
+  send({ type: "turn.failed", error: { message: "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header" } })
+  process.exit(1)
+}
+
+/** The answer of FAKE_CODEX_TOOL on the server its settings name, at its address, with its headers' values. */
+async function toolAnswer() {
+  const servers = configs.find((c) => c.startsWith("mcp_servers="))
+  if (!process.env.FAKE_CODEX_TOOL || !servers) return ""
+  const [, name, url] = /^mcp_servers=\{ (\S+) = \{ url = "([^"]+)"/.exec(servers)
+  const headers = Object.fromEntries([...servers.matchAll(/"?([\w-]+)"? = "(CELLER_VALUE_\d+)"/g)].map(([, header, variable]) => [header, process.env[variable]]))
+  const mcp = new Client({ name: "fake-codex", version: "0.171.0" })
+  await mcp.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers } }))
+  try {
+    log("tools/list", (await mcp.listTools()).tools.map((t) => t.name))
+    send({ type: "item.started", item: { id: "item_0", type: "mcp_tool_call", server: name, tool: process.env.FAKE_CODEX_TOOL, arguments: { text: "hi" }, status: "in_progress" } })
+    const answer = await mcp.callTool({ name: process.env.FAKE_CODEX_TOOL, arguments: { text: "hi" } })
+    return answer.content.map((c) => c.text ?? "").join(" ")
+  } finally {
+    await mcp.close()
+  }
+}
+
+const used = await toolAnswer()
+const command = { id: "item_1", type: "command_execution", command: "/bin/zsh -lc 'npm test'", aggregated_output: "", status: "in_progress" }
+send({ type: "item.started", item: command })
+send({ type: "item.completed", item: { ...command, aggregated_output: "ok", exit_code: 0, status: "completed" } })
+send({ type: "item.completed", item: { id: "item_2", type: "file_change", changes: [{ path: path.join(cwd, "notes.md"), kind: "add" }], status: "completed" } })
+send({ type: "item.completed", item: { id: "item_3", type: "agent_message", text: `Ran them.${used ? ` ${used}` : ""}` } })
+send({ type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 4, cache_write_input_tokens: 2, output_tokens: 20, reasoning_output_tokens: 0 } })

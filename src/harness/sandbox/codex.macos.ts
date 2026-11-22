@@ -1,100 +1,55 @@
 // Codex on macOS: what every run of it starts with, in Codex's own settings (the keys of its config.toml), so each line
-// can be held against its documentation. Its sandbox here is macOS's own (Seatbelt). `home` is the config.toml of the
-// host's Codex home, the same for every run; `run` is what one run adds, its own places, given to Codex as its session's
-// settings (codex-acp's CODEX_CONFIG). Guarantees, each asserted for every system's file by test/harness.test.mjs:
+// can be held against its documentation. Its sandbox here is macOS's own (Seatbelt). Codex takes them for the run on
+// its command line, and loads no folder's own settings, as no folder is trusted in its home. Guarantees, each asserted
+// for every system's file by test/harness.test.mjs:
 // - every command runs in the sandbox, and what would go beyond it Codex refuses itself, asking no one;
 // - commands reach no network at all: everything outside the computer goes through the host's tools (MCP);
 // - they write only in the run's folder (only at work) and its own scratch folder inside it, and never touch the
 //   folder's own settings for the agents celler runs;
-// - they read the system's essentials, the folder, the programs on its PATH and what the host adds, nothing else, and
-//   never the system's temporary folders, which other programs share: their temporary files are in the scratch;
-// - their environment is Codex's core variables and the run's own home and temporary folders: no secrets;
-// - files named for secrets in the folder are closed to them, wherever they are and whenever they were made;
+// - they read the computer, but never the person's home (where the host keeps its data) or the system's temporary
+//   folders, which other programs share (their temporary files are in the scratch): there, only the folder, PATH's
+//   folders and what the host adds;
+// - their environment is Codex's core variables and the run's own home and temporary folders;
 // - no web search, no image read from anywhere on the computer, no plugins, hooks or memories.
 
 import path from "node:path"
-import { AGENT_SETTINGS, SECRET_NAMES, type Places } from "./places.js"
+import { AGENT_SETTINGS, type Places } from "./places.js"
 
-/**
- * Files named for secrets anywhere in the folder, there as the run starts or made later: never read. Codex takes them
- * as patterns of its own; the ones found as the run starts are named too (`run`).
- */
-const SECRETS = SECRET_NAMES.map((name) => `"**/${name}" = "deny"`).join("\n")
+/** The folder's own settings for the agents celler runs, wherever they are in it: never written, and so not read. */
+const SETTINGS = Object.fromEntries(AGENT_SETTINGS.flatMap((name) => [[`**/${name}`, "deny"], [`**/${name}/**`, "deny"]]))
 
-/**
- * The folder's own settings for the agents celler runs, wherever they are in it: never written (AGENT_SETTINGS). Codex
- * takes patterns only to deny, so its commands don't read them either.
- */
-const SETTINGS = AGENT_SETTINGS.flatMap((name) => [`"**/${name}" = "deny"`, `"**/${name}/**" = "deny"`]).join("\n")
+/** Each of these places with one access, as Codex's filesystem table takes them. */
+const each = (places: string[], access: "read" | "write" | "deny") => Object.fromEntries(places.map((place) => [place, access]))
 
-export function home(profile: string): string {
-  return `default_permissions = "${profile}"
-# What goes beyond the sandbox Codex refuses itself; only its MCP servers' questions come to the person.
-approvals_reviewer = "user"
-approval_policy = { granular = { sandbox_approval = false, rules = false, request_permissions = false, mcp_elicitations = true } }
-# Its sign-in in this home, not the person's own.
-cli_auth_credentials_store = "file"
-web_search = "disabled"
-
-# At work: the system's essentials read, the run's folder written; no network.
-[permissions.${profile}.filesystem]
-":minimal" = "read"
-
-[permissions.${profile}.filesystem.":workspace_roots"]
-"." = "write"
-${SETTINGS}
-${SECRETS}
-
-[permissions.${profile}.network]
-enabled = false
-
-# To read: the same, the folder read only.
-[permissions.${profile}-read.filesystem]
-":minimal" = "read"
-
-[permissions.${profile}-read.filesystem.":workspace_roots"]
-"." = "read"
-${SETTINGS}
-${SECRETS}
-
-[permissions.${profile}-read.network]
-enabled = false
-
-# Commands get Codex's core variables only; anything named like a key, secret or token is left out.
-[shell_environment_policy]
-inherit = "core"
-ignore_default_excludes = false
-set = { GIT_CONFIG_GLOBAL = "/dev/null" }
-
-[features]
-view_image = false
-prefer_mxc = true
-apps = false
-plugins = false
-hooks = false
-memories = false
-browser_use = false
-browser_use_external = false
-computer_use = false
-`
-}
-
-export function run(p: Places, purpose: "work" | "read", profile: string) {
+export default function codexOnMacos(p: Places, purpose: "work" | "read") {
   return {
+    // The run's own permission profile, the only one it runs in.
+    default_permissions: "run",
     permissions: {
-      // The run's own places, in the profile it runs in: its scratch in the folder written (to read too); the programs on
-      // its PATH and what the host adds, read; the system's temporary folders and secret files in the folder, never.
-      [purpose === "work" ? profile : `${profile}-read`]: {
-        filesystem: Object.fromEntries([
-          [p.scratch.root, "write"],
-          ...p.toolchain.map((dir) => [dir, "read"]),
-          ...p.readable.map((dir) => [dir, "read"]),
-          ...[...p.temps, ...p.secrets].map((place) => [place, "deny"]),
-        ]),
+      run: {
+        filesystem: {
+          // The computer read, but never the person's home or the system's temporary folders, each as a whole.
+          ":root": "read",
+          [p.home]: "deny",
+          ...each(p.temps, "deny"),
+          // In those, PATH's folders and what the host adds read; the run's scratch written, to read too.
+          ...each(p.tools, "read"),
+          ...each(p.readable, "read"),
+          [p.scratch.root]: "write",
+          // The run's folder: written at work, else read.
+          ":workspace_roots": { ".": purpose === "work" ? "write" : "read", ...SETTINGS },
+        },
+        network: { enabled: false },
       },
     },
-    // Its commands' own home, temporary folder and caches, in its scratch: nothing of the person's.
+    // What goes beyond the sandbox Codex refuses itself: no one is asked.
+    approval_policy: "never",
+    web_search: "disabled",
+    // Commands get Codex's core variables only, none named like a key, secret or token; their own home, temporary
+    // folder and caches in the run's scratch; and git with no personal settings.
     shell_environment_policy: {
+      inherit: "core",
+      ignore_default_excludes: false,
       set: {
         HOME: p.scratch.home,
         TMPDIR: p.scratch.tmp,
@@ -102,6 +57,17 @@ export function run(p: Places, purpose: "work" | "read", profile: string) {
         npm_config_cache: path.join(p.scratch.cache, "npm"),
         GIT_CONFIG_GLOBAL: "/dev/null",
       },
+    },
+    features: {
+      view_image: false,
+      prefer_mxc: true,
+      apps: false,
+      plugins: false,
+      hooks: false,
+      memories: false,
+      browser_use: false,
+      browser_use_external: false,
+      computer_use: false,
     },
   }
 }

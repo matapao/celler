@@ -1,18 +1,13 @@
 // What a run of a coding agent takes and gives, the same for every agent, and what the host lends the runtimes.
 
-import type { SessionConfigOption, SessionModeState, SessionUpdate } from "@agentclientprotocol/sdk/unstable"
-
-/** The host: how it introduces itself to an agent (ACP's clientInfo), and the mark its runs' environments carry. */
+/** The host: its name and version, which the agent's requests carry, and the mark its runs' environments carry. */
 export interface Host {
-  client: { name: string; title: string; version: string }
+  client: { name: string; version: string }
   mark(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
-  /** The host's own data, which no run's commands read (sandbox/places.ts). */
-  data?: string
 }
 
 /** What the runtimes say in the host's words, where those name the host's own settings. */
 export interface ClaudeWords {
-  noAdapter: string
   noClaude: string
   login: string
 }
@@ -20,7 +15,6 @@ export interface CodexWords {
   install: string
   login: string
   signedOut: string
-  untrusted: string
 }
 
 export type ModelTier = "fast" | "balanced" | "strong"
@@ -32,7 +26,7 @@ export type TokenUsage = ReturnType<typeof emptyUsage>
 /** A connector for one run, its values filled in. */
 export interface McpServerSpec {
   name: string
-  /** A program to start ("stdio") is the host's to start: a run is refused one (acp.ts acpMcpServers). */
+  /** A program to start ("stdio") is the host's to start: a run is refused one. */
   transport: "stdio" | "http" | "sse"
   url: string
   headers: Record<string, string>
@@ -45,13 +39,13 @@ export interface RunSpec {
   systemPrompt: string
   /** A tier or a model id. */
   model: string
-  /** A reasoning effort offered by the agent. It never changes its required permission mode. */
+  /** A reasoning effort offered by the agent. */
   effort?: string
   /** The session to continue with `resume`; a new session's id comes as a `session` event. */
   sessionId: string
   resume: boolean
   mcpServers: McpServerSpec[]
-  /** Puts what the agent asks to the person and waits; null when no one answered. Without it, every ask is cancelled. */
+  /** Puts what the agent asks to the person and waits; null when no one answered. Without it, every ask is declined. */
   ask?: (q: AgentAsk, signal: AbortSignal) => Promise<AskAnswer | null>
   /** Files given with the task, linked from the prompt. */
   attachments?: { path: string; name: string; type: string; size: number }[]
@@ -64,24 +58,19 @@ export interface RunSpec {
   purpose: "work" | "read" | "inference"
   /** Places outside the folder its commands may read, as the host gives them: a worktree's repository data. */
   readable?: string[]
-  /** The person trusts the folder with Codex, which loads a folder's own settings. */
-  trusted?: boolean
   timeoutMs: number
 }
 
 export type RunProgress =
-  /** A native session update for hosts that display or keep its original data. */
-  | { type: "update"; update: SessionUpdate }
-  /** Native settings and choices. The runtime alone selects the permission mode. */
-  | { type: "options"; modes: SessionModeState | null; options: SessionConfigOption[] }
   | { type: "session"; sessionId: string }
   /** A tool call once its summary is known; `parent`: the helper's call it came from; `helper`: what a helper it starts is to do. */
   | { type: "tool"; tool: string; summary: string; call?: string; parent?: string; helper?: string }
   | { type: "helper-done"; call: string; ok: boolean }
   /** A file a completed tool call changed. */
   | { type: "file"; file: string }
-  /** The agent's own settings as it publishes them. */
+  /** The agent's own settings as the run started them. */
   | { type: "settings"; settings: AgentSetting[] }
+  /** The message the agent is writing, as far as it has come. */
   | { type: "text"; text: string }
 
 export interface RunResult {
@@ -91,7 +80,7 @@ export interface RunResult {
   costUsd: number | null
   model?: string
   error?: string
-  /** Not there or not signed in: no run of this agent works until that is fixed. */
+  /** Not there, too old or not signed in: no run of this agent works until that is fixed. */
   runtimeDown?: boolean
   /** What was refused, as the agent described it ("Bash: npm test"). */
   permissionDenials: string[]
@@ -120,8 +109,7 @@ export interface RuntimeHealth {
   ok: boolean
   checkedAt: number
   detail: string
-  /** Where its adapter and its own program were found. */
-  path?: string
+  /** Where its program was found. */
   program?: string
   /** What the host can offer: showing where the program is, or a sign-in. */
   fix?: "find-claude" | "find-codex" | "login" | "login-codex"
@@ -134,22 +122,20 @@ export interface AgentLogin {
   sendCode(code: string): void
 }
 
-/** One of an agent's own settings, by its own name, on the value it is on, in its own words. */
+/** One of an agent's own settings, by its own name, on the value it is on. */
 export interface AgentSetting {
   id: string
   name: string
   value: string
 }
 
-/** What an agent asks before it acts, with its own options to pick from; or a form or page it asks for instead. */
+/** What an agent asks before it acts, with the options to pick from; or a form or page it asks for instead. */
 export interface AgentAsk {
   call: string
   tool: string
   title: string
-  /** ACP's kind of call: read, edit, execute and so on. */
-  kind?: string
   input?: unknown
-  options: { optionId: string; name: string; kind: string }[]
+  options: { optionId: string; name: string; kind: "allow_once" | "reject_once" }[]
   form?: { message: string; fields?: AgentFormField[]; url?: string }
 }
 
@@ -162,7 +148,7 @@ export interface AgentFormField {
   choices?: { value: string; label: string }[]
 }
 
-/** The option of its own the person picked, or the form or page answered. */
+/** The option the person picked, or the form or page answered. */
 export type AskAnswer = { option: string } | { accept: boolean; content?: Record<string, unknown> }
 
 export function failure(error: string, runtimeDown = false): RunResult {

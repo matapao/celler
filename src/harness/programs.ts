@@ -1,14 +1,15 @@
-// The agents' own programs on this computer, and how a program starts. A program is looked for where its installers
-// put it, then on PATH; when it isn't there, the person shows the host where it is (chosenPrograms).
+// The agents' own programs on this computer, and the environments they start in. A program is looked for where its
+// installers put it, then on PATH; when it isn't there, the person shows the host where it is (chosenPrograms). Each is
+// a native program, started as it is.
 
 import { execFile } from "node:child_process"
-import { closeSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs"
+import { readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs"
+import { createRequire } from "node:module"
 import os from "node:os"
 import path from "node:path"
 import { harnessLimits } from "../limits.js"
 import type { Places } from "./sandbox/places.js"
 import type { Host } from "./types.js"
-import { bootstrapFile } from "./windowless.js"
 
 const isWin = process.platform === "win32"
 const home = os.homedir()
@@ -70,13 +71,13 @@ export function chosenPrograms(file: string): { get(program: AgentProgram): stri
 export async function checkProgram(program: AgentProgram, file: string): Promise<{ path: string; version: string } | { error: string }> {
   const { name, version: says } = PROGRAMS[program]
   if (!path.isAbsolute(file) || !isFile(file)) return { error: `That isn't a program: pick ${name} itself (${program}${isWin ? ".exe" : ""}).` }
-  const launch = launchFor(file)
-  const version = await runForOutput(launch, ["--version"], agentEnv(launch, {}, { mark: (env) => env }))
+  const started = program === "codex" ? codexProgram(file).program : realProgram(file)
+  const version = await runForOutput(started, ["--version"], agentEnv({}, { mark: (env) => env }))
   if (!version || !says.test(version)) return { error: `That isn't ${name}: it didn't say so when asked its version.` }
   return { path: file, version: version.split("\n")[0] }
 }
 
-/** The real program behind an npm bin link, or behind a Windows .cmd shim (its last "%dp0%\..." that isn't node). */
+/** The real program behind a link, or behind a Windows .cmd shim of npm's (its last "%dp0%\..." that isn't node). */
 export function realProgram(file: string): string {
   try {
     if (!isWin || !/\.(cmd|bat)$/i.test(file)) return realpathSync(file)
@@ -87,51 +88,68 @@ export function realProgram(file: string): string {
   }
 }
 
-/** A Node script, by the runtime its first line names, else by its name. */
-function isNodeScript(file: string): boolean {
-  let first = ""
-  try {
-    const fd = openSync(file, "r")
-    const head = Buffer.alloc(128)
-    first = head.toString("utf8", 0, readSync(fd, head, 0, head.length, 0)).split("\n")[0]
-    closeSync(fd)
-  } catch {
-    /* unreadable: decided by its name */
-  }
-  return first.startsWith("#!") ? /\bnode\b/.test(first) : /\.[cm]?js$/i.test(file)
-}
-
-export interface Launch {
-  cmd: string
-  args: string[]
-  /** Runs on this process's Node runtime (Electron's, in an Electron host). */
-  node: boolean
+/** Codex's own program in npm's package for each system, by the target it is built for. */
+export const CODEX_TARGETS: Record<string, string> = {
+  "darwin-arm64": "aarch64-apple-darwin",
+  "darwin-x64": "x86_64-apple-darwin",
+  "linux-arm64": "aarch64-unknown-linux-musl",
+  "linux-x64": "x86_64-unknown-linux-musl",
+  "win32-arm64": "aarch64-pc-windows-msvc",
+  "win32-x64": "x86_64-pc-windows-msvc",
 }
 
 /**
- * How to start a program: a Node script on this process's own runtime, so no Node install is needed, and on Windows
- * through the bootstrap that keeps what it starts from opening console windows (windowless.ts); anything else directly.
+ * The program to start for a Codex found: itself when it is Codex's own program, or the one npm's wrapper of it
+ * (`codex.js`, which needs Node) starts, found as the wrapper finds it; with the folder that wrapper's package keeps
+ * Codex's own helpers in (its ripgrep), to go on PATH.
  */
-export function launchFor(file: string): Launch {
-  const target = realProgram(file)
-  if (!isNodeScript(target)) return { cmd: target, args: [], node: false }
-  return { cmd: process.execPath, args: isWin ? [bootstrapFile(), target] : [target], node: true }
+export function codexProgram(file: string): { program: string; path: string[] } {
+  const real = realProgram(file)
+  const platform = `${process.platform}-${process.arch}`
+  const target = CODEX_TARGETS[platform]
+  if (!/\.[cm]?js$/i.test(real) || !target) return { program: real, path: [] }
+  const root = path.join(vendorOf(real, platform), target)
+  const exe = isWin ? "codex.exe" : "codex"
+  // Its package's layout, then the one before it.
+  for (const [program, helpers] of [[path.join(root, "bin", exe), path.join(root, "codex-path")], [path.join(root, "codex", exe), path.join(root, "path")]]) {
+    if (isFile(program)) return { program, path: isFolder(helpers) ? [helpers] : [] }
+  }
+  return { program: real, path: [] }
 }
 
-/** An agent's environment: this process's, marked as the host's run, without a parent agent's identity; then `add` ('' removes). */
-export function agentEnv(launch: Launch, add: Record<string, string>, host: Pick<Host, "mark">): NodeJS.ProcessEnv {
+/** Where npm's wrapper of Codex keeps the programs it starts: in the package for this system, else in its own. */
+function vendorOf(wrapper: string, platform: string): string {
+  try {
+    return path.join(path.dirname(createRequire(wrapper).resolve(`@openai/codex-${platform}/package.json`)), "vendor")
+  } catch {
+    return path.join(path.dirname(wrapper), "..", "vendor")
+  }
+}
+
+function isFolder(dir: string): boolean {
+  try {
+    return statSync(dir).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/** The prefix of the variables that carry a run's connector values to its agent, never on its command line. */
+export const VALUES = "CELLER_VALUE_"
+
+/**
+ * An agent's environment for its own errands (its version, its sign-in): this process's, marked as the host's run,
+ * without a parent agent's identity or the connector values of a run this host was started in; then `add` ('' removes).
+ */
+export function agentEnv(add: Record<string, string>, host: Pick<Host, "mark">): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = host.mark({ ...process.env })
   for (const k of ["ELECTRON_RUN_AS_NODE", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]) delete env[k]
-  // Connector values a run of its own host carried (a host started inside a run) are no run's here.
-  for (const k of Object.keys(env)) if (k.startsWith("CELLER_VALUE_")) delete env[k]
-  return finished(env, launch, add)
+  for (const k of Object.keys(env)) if (k.startsWith(VALUES)) delete env[k]
+  return withAdded(env, add)
 }
 
-/** An environment as every program here starts with it: a Node script as Node, then `add` ('' removes). */
-function finished(env: NodeJS.ProcessEnv, launch: Launch, add: Record<string, string>): NodeJS.ProcessEnv {
-  // A Node script runs on this process's binary, Electron's in an Electron host, as Node.
-  // nosemgrep: semgrep.binary-as-node
-  if (launch.node) env.ELECTRON_RUN_AS_NODE = "1"
+/** `env` with `add`'s variables, an empty value taking one out. */
+function withAdded(env: NodeJS.ProcessEnv, add: Record<string, string>): NodeJS.ProcessEnv {
   for (const [name, value] of Object.entries(add)) {
     if (value) env[name] = value
     else delete env[name]
@@ -163,18 +181,18 @@ export const PROXIES = KEPT.filter((name) => /proxy/i.test(name))
  * A run's environment, as its own user's: what it keeps of this process's (KEPT), its own temporary folder and caches in
  * its scratch (sandbox/places.ts), marked as the host's run, then `add` ('' removes).
  */
-export function runEnv(launch: Launch, add: Record<string, string>, host: Pick<Host, "mark">, places: Places): NodeJS.ProcessEnv {
+export function runEnv(add: Record<string, string>, host: Pick<Host, "mark">, places: Places): NodeJS.ProcessEnv {
   const kept: NodeJS.ProcessEnv = {}
   for (const name of [...KEPT, ...(isWin ? KEPT_ON_WINDOWS : [])]) if (process.env[name] !== undefined) kept[name] = process.env[name]
   for (const [name, value] of Object.entries(process.env)) if (name.startsWith("LC_") && value !== undefined) kept[name] = value
   const own = { TMPDIR: places.scratch.tmp, TMP: places.scratch.tmp, TEMP: places.scratch.tmp, XDG_CACHE_HOME: places.scratch.cache, npm_config_cache: path.join(places.scratch.cache, "npm") }
-  return finished(host.mark({ ...kept, ...own }), launch, add)
+  return withAdded(host.mark({ ...kept, ...own }), add)
 }
 
 /** A program's output, or null when it fails; `anyExit` keeps the output of a non-zero exit. */
-export function runForOutput(launch: Launch, args: string[], env: NodeJS.ProcessEnv, anyExit = false): Promise<string | null> {
+export function runForOutput(file: string, args: string[], env: NodeJS.ProcessEnv, anyExit = false): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile(launch.cmd, [...launch.args, ...args], { env, timeout: harnessLimits.askMs, windowsHide: true }, (err, out) =>
+    execFile(file, args, { env, timeout: harnessLimits.askMs, windowsHide: true }, (err, out) =>
       resolve(err && !(anyExit && typeof (err as { code?: unknown }).code === "number") ? null : String(out).trim()),
     )
   })

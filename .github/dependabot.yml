@@ -1,0 +1,16 @@
+# Keeps celler's dependencies at their latest stable versions, the agent SDKs among them. A pull request that updates
+# an agent SDK also sets agentVersions in src/limits.ts to the version of the agent it is made with (AGENTS.md); its
+# test says so until it does.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: daily
+    groups:
+      agent-sdks:
+        patterns: ["@anthropic-ai/claude-agent-sdk", "@openai/codex-sdk"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

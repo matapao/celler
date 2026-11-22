@@ -36,7 +36,7 @@ export const postLimits = { timeoutMs: 30_000, maxResponseBytes: 1024 * 1024 }
 export const harnessLimits = {
   /** A program asked its version or whether it is signed in. */
   askMs: 20_000,
-  /** A health check's test run; Codex starts its app-server first. */
+  /** A health check's test run. */
   claudeTestRunMs: 90_000,
   codexTestRunMs: 180_000,
   /** A cancelled or finished agent's time to exit before it is stopped, with what it started. */
@@ -51,6 +51,12 @@ export const harnessLimits = {
   searchChars: 80,
   helperChars: 200,
 }
+
+/**
+ * The oldest of each agent's own programs a run starts: the version its SDK is made with (the Claude Agent SDK's
+ * `claudeCodeVersion`, the Codex SDK's `@openai/codex`), which test/harness.test.mjs holds against the installed SDKs.
+ */
+export const agentVersions = { claude: "2.1.330", codex: "0.171.0" }
 
 const ZERO_ALLOWED = new Set(["discoveryBytes", "maxDepth", "progressIntervalMs"])
 
