@@ -129,13 +129,16 @@ export interface AgentSetting {
   value: string
 }
 
-/** What an agent asks before it acts, with the options to pick from; or a form or page it asks for instead. */
+/**
+ * What an agent asks before it acts, with the options to pick from; or a form or page it asks for instead. An option
+ * allows or rejects, once or from then on, in ACP's words for it: what an agent offers is what the person picks from.
+ */
 export interface AgentAsk {
   call: string
   tool: string
   title: string
   input?: unknown
-  options: { optionId: string; name: string; kind: "allow_once" | "reject_once" }[]
+  options: { optionId: string; name: string; kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" }[]
   form?: { message: string; fields?: AgentFormField[]; url?: string }
 }
 
