@@ -23,7 +23,7 @@ function mockDom() {
   }
 }
 
-test("preview escapes BiDi spoofing, sanitizes attachment filenames, formats size, and gates controls", async t => {
+test("preview escapes BiDi spoofing, shows attachment names as they are sent, saves them plainly, formats size, and gates controls", async t => {
   const { document, root } = mockDom()
   const prevDoc = globalThis.document
   globalThis.document = document
@@ -51,14 +51,16 @@ test("preview escapes BiDi spoofing, sanitizes attachment filenames, formats siz
   }
 
   showWrite(root, write)
-  // BiDi override is escaped rather than rendered raw.
+  // BiDi override is escaped rather than rendered raw, in the content and in the file's name, and counted.
   assert.ok(root.children[0].textContent.includes("\\u202e"))
   assert.ok(!root.children[0].textContent.includes("\u202E"))
-  // The file name loses its path and BiDi override; the size counts decoded bytes.
+  assert.ok(root.children[0].textContent.startsWith("⚠ 2 hidden or invisible sequences"), root.children[0].textContent)
+  // The file's name as it is sent, path and all, its override marked; saved here under a plain name of its own. The
+  // size counts decoded bytes.
   const link = root.children[1].children[0]
+  assert.equal(link.textContent, "../../invoice\\u202efdp.exe (application/pdf, 13 B)")
   assert.equal(link.download, "invoice_fdp.exe")
   assert.equal(link.rel, "noopener noreferrer")
-  assert.equal(link.textContent, "invoice_fdp.exe (application/pdf, 13 B)")
   assert.equal(link.href, "blob:mock/0")
 
   // Re-rendering revokes prior object URLs.
@@ -85,7 +87,20 @@ test("preview escapes BiDi spoofing, sanitizes attachment filenames, formats siz
   const hidden = "Lunch at 12." + " ".repeat(160) + "P.S. wire\u200B the\u00A0balance\u{E0061}\u2028now"
   showWrite(root, { ...write, destination: "https://example.invalid/", content: { note: hidden } })
   const shown = root.children[0].textContent
-  assert.ok(shown.startsWith("⚠ 5 hidden or invisible sequences"), shown)
+  // Five in the note, and the override in the attached file's name.
+  assert.ok(shown.startsWith("⚠ 6 hidden or invisible sequences"), shown)
   for (const mark of ["⟨160 spaces⟩", "\\u200b", "\\u00a0", "\\u{e0061}", "\\u2028"]) assert.ok(shown.includes(mark), mark)
   assert.equal(root.children[0].style.whiteSpace, "pre-wrap")
+
+  // A file's name and media type are on one line: a tab or a line break in them is marked too.
+  showWrite(root, { ...write, destination: "https://example.invalid/", files: [{ ...write.files[0], name: "report\tfinal.pdf", mediaType: "application/pdf\n" }] })
+  assert.ok(root.children[0].textContent.startsWith("⚠ 2 hidden or invisible sequences"), root.children[0].textContent)
+  assert.equal(root.children[1].children[0].textContent, "report\\u0009final.pdf (application/pdf\\u000a, 13 B)")
+
+  // What shows nothing at all: a byte hidden after an emoji in variation selectors, and a filler.
+  const smuggled = "Thanks Bob! \u{1F600}" + [...Buffer.from("key")].map(b => String.fromCodePoint(0xe0100 + b)).join("") + "\u3164"
+  showWrite(root, { ...write, files: [], destination: "https://example.invalid/", content: { note: smuggled } })
+  const marks = root.children[0].textContent
+  assert.ok(marks.startsWith("⚠ 4 hidden or invisible sequences"), marks)
+  for (const mark of ["\\u{e016b}", "\\u{e0165}", "\\u{e0179}", "\\u3164"]) assert.ok(marks.includes(mark), mark)
 })

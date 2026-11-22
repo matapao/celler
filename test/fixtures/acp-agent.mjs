@@ -1,6 +1,7 @@
 // A stand-in agent over ACP: no model is called. It says what it was sent in FAKE_ACP_LOG, offers two modes as Claude's
 // adapter does, streams a reply, asks before it runs a command, and ends its turn with its usage. With FAKE_ACP_TOOL, it
 // first lists the tools of the HTTP MCP server it was given and calls that one, and its reply ends with the tool's answer.
+import { spawn } from "node:child_process"
 import { appendFileSync } from "node:fs"
 import path from "node:path"
 import { Readable, Writable } from "node:stream"
@@ -57,11 +58,25 @@ agent({ name: "fake-acp-agent" })
     await update({ sessionUpdate: "agent_message_chunk", messageId: "m1", content: { type: "text", text: "Hello." } })
     const toolCall = { toolCallId: "t1", title: "Run the tests", kind: "execute", rawInput: { command: "npm test" } }
     await update({ sessionUpdate: "tool_call", ...toolCall, status: "pending" })
-    const answer = await client.request("session/request_permission", {
+    const asked = client.request("session/request_permission", {
       sessionId: params.sessionId,
       toolCall,
       options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }],
     })
+    // With FAKE_ACP_LEAVE_RUNNING, a command of its keeps running after it, and says where it is.
+    if (process.env.FAKE_ACP_LEAVE_RUNNING) {
+      const left = spawn(process.execPath, ["-e", "setTimeout(() => undefined, 60_000)"], { stdio: "ignore" })
+      // Not waited for: the agent can exit while it goes on, as a command put in the background does.
+      left.unref()
+      appendFileSync(process.env.FAKE_ACP_LEAVE_RUNNING, String(left.pid))
+    }
+    // With FAKE_ACP_EXIT_WHILE_ASKING, it is gone while the person is still asked.
+    if (process.env.FAKE_ACP_EXIT_WHILE_ASKING) {
+      asked.catch(() => undefined)
+      setTimeout(() => process.exit(3), 100)
+      return new Promise(() => undefined)
+    }
+    const answer = await asked
     const allowed = answer.outcome.outcome === "selected" && answer.outcome.optionId === "yes"
     await update({ sessionUpdate: "tool_call_update", toolCallId: "t1", status: allowed ? "completed" : "failed" })
     const said = (allowed ? " Ran them." : " Didn't run them.") + (used ? ` ${used}` : "")

@@ -16,7 +16,7 @@ For the people and coding agents who change this code. People who use the librar
 4. Every call is checked against the run's grants, the live policy and the whole delegation chain.
 5. A delivery is recorded as sent before anything checks its response.
 6. The harness sees only this library's own error messages, never raw host, adapter or database errors.
-7. An agent's commands reach no network, write only in the run's folder (their scratch and temporary files are inside it, in `.celler/`), and read nothing of the person's home, environment, secret files or the system's temporary folders: one settings file per agent per system (`src/harness/sandbox/`), each asserted against the same rule.
+7. An agent's commands reach no network, write only in the run's folder and never its own settings for the agents celler runs (their scratch and temporary files are the run's own: in `.celler/` inside it, and Claude Code's shell's in a short folder of the run's), and read nothing of the person's home, environment, secret files or the system's temporary folders: one settings file per agent per system (`src/harness/sandbox/`), each asserted against the same rule.
 
 ## Style
 

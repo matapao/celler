@@ -2,14 +2,14 @@
 
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { existsSync } from "node:fs"
+import { existsSync, mkdtempSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import { harnessLimits } from "../limits.js"
 import { acpMcpServers, killTree, runAcp, Turn } from "./acp.js"
 import type { Agent, Start } from "./agents.js"
 import { agentEnv, launchFor, PROXIES, runEnv, runForOutput } from "./programs.js"
-import { inside, placesFor, removeScratch, scratchFor, type Places } from "./sandbox/places.js"
+import { inside, placesFor, removeFolder, removeScratch, scratchFor, type Places } from "./sandbox/places.js"
 import { errorText, failedRun, type AgentLogin, type Host, type RunHandle, type RunProgress, type Runtime, type RuntimeHealth, type RunSpec } from "./types.js"
 
 export class AgentRuntime implements Runtime {
@@ -40,9 +40,15 @@ export class AgentRuntime implements Runtime {
     if (typeof version !== "string") return { ok: false, checkedAt, ...at, detail: version.error }
     if (agent.signedIn.yes(answer) === false) return { ok: false, checkedAt, ...at, fix: agent.login.fix, detail: `${version} · ${agent.login.signedOut}` }
     if (!deep) return { ok: true, checkedAt, ...at, detail: `${version} (not yet test-run)` }
-    const test = { cwd: os.tmpdir(), prompt: "Reply with exactly: OK", systemPrompt: "", model: "fast", sessionId: randomUUID(), resume: false, mcpServers: [], purpose: "inference" as const, timeoutMs: agent.testRunMs }
-    const r = await this.run(test, () => undefined).done
-    return { ok: r.ok, checkedAt, ...at, detail: `${version} · ${r.ok ? "test run succeeded" : (r.error ?? "test run failed")}` }
+    // In an empty folder of its own, which no other program or person shares, gone after it.
+    const folder = mkdtempSync(path.join(os.tmpdir(), "celler-test-run-"))
+    try {
+      const test = { cwd: folder, prompt: "Reply with exactly: OK", systemPrompt: "", model: "fast", sessionId: randomUUID(), resume: false, mcpServers: [], purpose: "inference" as const, timeoutMs: agent.testRunMs }
+      const r = await this.run(test, () => undefined).done
+      return { ok: r.ok, checkedAt, ...at, detail: `${version} · ${r.ok ? "test run succeeded" : (r.error ?? "test run failed")}` }
+    } finally {
+      await removeFolder(folder)
+    }
   }
 
   /** Starts the agent's own sign-in, or says why it can't. */
@@ -78,7 +84,7 @@ export class AgentRuntime implements Runtime {
       agent.ready?.()
       start = agent.start(spec, found, places)
     } catch (err) {
-      removed()
+      void removed()
       return failedRun(`${agent.name} could not be set up for this run: ${errorText(err)}`)
     }
     const launch = launchFor(found.adapter)

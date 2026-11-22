@@ -1,9 +1,14 @@
 import type { ApprovalState, RunStatus, Write } from "./store.js"
 
 // What a reviewer could not see: controls, format characters (bidi, zero-width, tag), private-use, unassigned and
-// surrogate code points, and every separator but the plain space. Tab, newline and carriage return stay.
-const HIDDEN = /(?![\t\n\r ])[\p{C}\p{Z}]/gu
-const HIDDEN_IN_NAME = /(?! )[\p{C}\p{Z}]/gu
+// surrogate code points, separators, and what Unicode says shows nothing at all (variation selectors, which can carry a
+// byte each after any character, and fillers).
+const INVISIBLE = "[\\p{C}\\p{Z}\\p{Default_Ignorable_Code_Point}]"
+const invisibleBut = (shown: string) => new RegExp(`(?![${shown}])${INVISIBLE}`, "gu")
+// In the packet's content, laid out in lines, the plain space, tab, newline and carriage return show; in a file's name
+// or media type, on one line, only the plain space does.
+const HIDDEN = invisibleBut("\\t\\n\\r ")
+const HIDDEN_IN_NAME = invisibleBut(" ")
 // A long run of spaces after text can push the rest of a line out of view.
 const LONG_SPACES = /(?<=\S) {16,}/g
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
@@ -15,11 +20,11 @@ function escapeChar(ch: string): string {
   return code > 0xffff ? `\\u{${code.toString(16)}}` : "\\u" + code.toString(16).padStart(4, "0")
 }
 
-/** Text with nothing left to hide: hidden characters escaped and long space runs counted out. */
-function reveal(text: string) {
+/** Text with nothing left to hide: what `hidden` finds escaped, and long space runs counted out. */
+function reveal(text: string, hidden = HIDDEN) {
   let marked = 0
   const shown = text
-    .replace(HIDDEN, ch => (marked++, escapeChar(ch)))
+    .replace(hidden, ch => (marked++, escapeChar(ch)))
     .replace(LONG_SPACES, run => (marked++, `⟨${run.length} spaces⟩`))
   return { shown, marked }
 }
@@ -54,7 +59,10 @@ function revokeElementUrls(element: HTMLElement) {
 export function showWrite(element: HTMLElement, write: Write) {
   revokeElementUrls(element)
   const { files, ...details } = write
-  const { shown, marked } = reveal(JSON.stringify(details, null, 2))
+  // Each file as it is sent: its name and media type as they are, with what can't be seen marked too.
+  const attachments = files.map((file) => ({ file, name: reveal(file.name, HIDDEN_IN_NAME), mediaType: reveal(file.mediaType, HIDDEN_IN_NAME) }))
+  const { shown, marked: inContent } = reveal(JSON.stringify(details, null, 2))
+  const marked = attachments.reduce((sum, a) => sum + a.name.marked + a.mediaType.marked, inContent)
   const text = document.createElement("pre")
   // Wrap instead of scrolling, so no part of a line sits out of view.
   text.style.whiteSpace = "pre-wrap"
@@ -65,12 +73,12 @@ export function showWrite(element: HTMLElement, write: Write) {
   element.replaceChildren(text)
 
   const createdUrls: string[] = []
-  for (const file of files) {
+  for (const { file, name, mediaType } of attachments) {
     const bytes = decodeBase64(file.base64)
-    const safeName = sanitizeFilename(file.name)
     const link = document.createElement("a")
-    link.textContent = `${safeName} (${reveal(file.mediaType).shown}, ${formatBytes(bytes.byteLength)})`
-    link.download = safeName
+    link.textContent = `${name.shown} (${mediaType.shown}, ${formatBytes(bytes.byteLength)})`
+    // Saved on this computer under a plain name of its own: no folder, nothing hidden, no leading dot.
+    link.download = sanitizeFilename(file.name)
     link.rel = "noopener noreferrer"
     // octet-stream, not the packet's own media type: a blob of HTML would run in this page's origin.
     if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {

@@ -5,15 +5,28 @@
 // settings (codex-acp's CODEX_CONFIG). Guarantees, each asserted for every system's file by test/harness.test.mjs:
 // - every command runs in the sandbox, and what would go beyond it Codex refuses itself, asking no one;
 // - commands reach no network at all: everything outside the computer goes through the host's tools (MCP);
-// - they write only in the run's folder (only at work) and its own scratch folder inside it;
+// - they write only in the run's folder (only at work) and its own scratch folder inside it, and never touch the
+//   folder's own settings for the agents celler runs;
 // - they read the system's essentials, the folder, the programs on its PATH and what the host adds, nothing else, and
 //   never the system's temporary folders, which other programs share: their temporary files are in the scratch;
 // - their environment is Codex's core variables and the run's own home and temporary folders: no secrets;
-// - files named for secrets in the folder are closed to them (when there are any, as the run starts);
+// - files named for secrets in the folder are closed to them, wherever they are and whenever they were made;
 // - no web search, no image read from anywhere on the computer, no plugins, hooks or memories.
 
 import path from "node:path"
-import type { Places } from "./places.js"
+import { AGENT_SETTINGS, SECRET_NAMES, type Places } from "./places.js"
+
+/**
+ * Files named for secrets anywhere in the folder, there as the run starts or made later: never read. Codex takes them
+ * as patterns of its own; the ones found as the run starts are named too (`run`).
+ */
+const SECRETS = SECRET_NAMES.map((name) => `"**/${name}" = "deny"`).join("\n")
+
+/**
+ * The folder's own settings for the agents celler runs, wherever they are in it: never written (AGENT_SETTINGS). Codex
+ * takes patterns only to deny, so its commands don't read them either.
+ */
+const SETTINGS = AGENT_SETTINGS.flatMap((name) => [`"**/${name}" = "deny"`, `"**/${name}/**" = "deny"`]).join("\n")
 
 export function home(profile: string): string {
   return `default_permissions = "${profile}"
@@ -30,6 +43,8 @@ web_search = "disabled"
 
 [permissions.${profile}.filesystem.":workspace_roots"]
 "." = "write"
+${SETTINGS}
+${SECRETS}
 
 [permissions.${profile}.network]
 enabled = false
@@ -40,6 +55,8 @@ enabled = false
 
 [permissions.${profile}-read.filesystem.":workspace_roots"]
 "." = "read"
+${SETTINGS}
+${SECRETS}
 
 [permissions.${profile}-read.network]
 enabled = false
@@ -70,16 +87,15 @@ export function run(p: Places, purpose: "work" | "read", profile: string) {
   return {
     permissions: {
       // The run's own places, in the profile it runs in: its scratch in the folder written (to read too); the programs on
-      // its PATH and what the host adds, read.
+      // its PATH and what the host adds, read; the system's temporary folders and secret files in the folder, never.
       [purpose === "work" ? profile : `${profile}-read`]: {
         filesystem: Object.fromEntries([
           [p.scratch.root, "write"],
           ...p.toolchain.map((dir) => [dir, "read"]),
           ...p.readable.map((dir) => [dir, "read"]),
+          ...[...p.temps, ...p.secrets].map((place) => [place, "deny"]),
         ]),
       },
-      // Never read: the system's temporary folders, and secret files in the folder.
-      filesystem: { deny_read: [...p.temps, ...p.secrets] },
     },
     // Its commands' own home, temporary folder and caches, in its scratch: nothing of the person's.
     shell_environment_policy: {

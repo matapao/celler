@@ -1,13 +1,19 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
+import http from "node:http"
 import os from "node:os"
 import path from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { DatabaseSync } from "node:sqlite"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
+import { CallToolResultSchema, CreateTaskResultSchema } from "@modelcontextprotocol/sdk/types.js"
 import { createApp } from "celler"
 import { AgentRuntime, claudeAgent, codexAgent, codexHomeConfig, harnessPlatform, SimulatedRuntime } from "celler/harness"
 import { acpMcpServers } from "../dist/harness/acp.js"
+import { harnessLimits } from "../dist/limits.js"
 import { PROXIES, runEnv } from "../dist/harness/programs.js"
 import claudeOnLinux from "../dist/harness/sandbox/claude.linux.js"
 import claudeOnMacos from "../dist/harness/sandbox/claude.macos.js"
@@ -15,7 +21,8 @@ import claudeOnWindows from "../dist/harness/sandbox/claude.windows.js"
 import * as codexOnLinux from "../dist/harness/sandbox/codex.linux.js"
 import * as codexOnMacos from "../dist/harness/sandbox/codex.macos.js"
 import * as codexOnWindows from "../dist/harness/sandbox/codex.windows.js"
-import { SECRET_NAMES, secretsIn, systemTemps, toolchainOf } from "../dist/harness/sandbox/places.js"
+import { AGENT_SETTINGS, removeScratch, scratchFor, SECRET_NAMES, secretsIn, systemTemps, toolchainOf } from "../dist/harness/sandbox/places.js"
+import { until } from "./support.mjs"
 
 const host = { client: { name: "host", title: "Host", version: "1.0.0" }, mark: env => ({ ...env, HOST_RUN: "1" }) }
 const claudeWords = { noAdapter: "No adapter in this host.", noClaude: "Claude Code isn't here.", login: "Sign in to Claude in the host." }
@@ -25,7 +32,7 @@ const spec = (over = {}) => ({ cwd: os.tmpdir(), prompt: "x", systemPrompt: "", 
 /** A run's places, as sandbox/places.ts works them out: under `dir`, with one of each kind, its scratch in its folder. */
 const placesIn = dir => ({
   folder: path.join(dir, "work"),
-  scratch: { root: path.join(dir, "work", ".celler", "run-1"), tmp: path.join(dir, "work", ".celler", "run-1", "tmp"), home: path.join(dir, "work", ".celler", "run-1", "home"), cache: path.join(dir, "work", ".celler", "run-1", "cache") },
+  scratch: { root: path.join(dir, "work", ".celler", "run-1"), tmp: path.join(dir, "work", ".celler", "run-1", "tmp"), home: path.join(dir, "work", ".celler", "run-1", "home"), cache: path.join(dir, "work", ".celler", "run-1", "cache"), short: "/private/tmp/celler-run1" },
   temps: ["/tmp", "/private/tmp"],
   home: os.homedir(),
   data: path.join(dir, "data"),
@@ -120,20 +127,29 @@ test("each harness's settings for each system keep its commands to the folder, o
       assert.deepEqual(own.sandbox.filesystem.allowWrite, purpose === "work" ? [p.folder] : [p.scratch.root], at)
       assert.ok(own.sandbox.filesystem.allowWrite.every(dir => dir === p.folder || dir.startsWith(p.folder + path.sep)), at)
       // Never read: the person's home, the host's data, the system's temporary folders and secret files; read again: the
-      // folder, its shell's own temporary folder, its toolchain and what the host adds, and nothing else.
+      // folder, the run's short folder (its shell's temporary one, never the one all of the person's Claude Code shares),
+      // its toolchain and what the host adds, and nothing else.
       assert.deepEqual(own.sandbox.filesystem.denyRead, [p.home, p.data, ...p.temps, ...p.secrets], at)
-      const ownTmp = own.sandbox.filesystem.allowRead.filter(dir => /[\\/]claude-\d+$/.test(dir))
-      assert.ok(ownTmp.every(dir => /^(\/private)?\/tmp\/claude-\d+$/.test(dir)), at)
-      assert.deepEqual(own.sandbox.filesystem.allowRead.filter(dir => !ownTmp.includes(dir)), [p.folder, ...p.toolchain, ...p.readable], at)
-      // Its temporary folder, and its commands', in its scratch in the folder.
-      assert.deepEqual(own.env, { CLAUDE_CODE_TMPDIR: p.scratch.tmp }, at)
+      assert.deepEqual(own.sandbox.filesystem.allowRead, [p.folder, p.scratch.short, ...p.toolchain, ...p.readable], at)
+      // Its temporary folder, where its sandbox gives its commands theirs: the run's short one; and git with no personal
+      // settings, which its commands can't read.
+      assert.deepEqual(own.env, { CLAUDE_CODE_TMPDIR: p.scratch.short, GIT_CONFIG_GLOBAL: system === "windows" ? "NUL" : "/dev/null" }, at)
       // The connectors' values and the proxies' never reach its commands.
       assert.deepEqual(own.sandbox.credentials.envVars, p.hidden.map(name => ({ name, mode: "deny" })), at)
       // Its commands never wait for the person: each is in the sandbox, which keeps it to the rest.
       assert.deepEqual(own.settings.permissions.allow, ["Bash"], at)
       // Its own file tools: in the folder only, and never a secret file there.
       assert.deepEqual([own.settings.permissions.blockReadsOutsideWorkingDirectories, own.settings.permissions.blockWritesOutsideWorkingDirectories], [true, true], at)
-      for (const name of SECRET_NAMES) assert.ok(own.settings.permissions.deny.includes(`Read(**/${name})`), `${at}: ${name}`)
+      // Claude Code puts these into its sandbox too, for its commands: checked on macOS with a real run.
+      for (const name of SECRET_NAMES) {
+        assert.ok(own.settings.permissions.deny.includes(`Read(**/${name})`), `${at}: ${name}`)
+        assert.ok(own.settings.permissions.deny.includes(`Edit(**/${name})`), `${at}: ${name}`)
+      }
+      // The folder's own settings for the agents celler runs, never written: one run can't set up what another starts.
+      for (const name of AGENT_SETTINGS) {
+        assert.ok(own.settings.permissions.deny.includes(`Edit(**/${name})`), `${at}: ${name}`)
+        assert.ok(own.settings.permissions.deny.includes(`Edit(**/${name}/**)`), `${at}: ${name}`)
+      }
       assert.deepEqual([own.settings.disableClaudeAiConnectors, own.settings.autoMemoryEnabled], [true, false], at)
       // Nothing of its own that reaches outside; to read, nothing that writes.
       const off = ["WebFetch", "WebSearch", ...(purpose === "read" ? ["Edit", "Write", "MultiEdit", "NotebookEdit"] : [])]
@@ -151,6 +167,15 @@ test("each harness's settings for each system keep its commands to the folder, o
     assert.equal(config.match(/\[permissions\.host(-read)?\.network\]\nenabled = false\n/g).length, 2, at)
     // Every place either profile grants, reads too: the system's essentials, and the run's folder.
     assert.deepEqual(config.match(/^"[^"\n]*" = "(read|write)"$/gm).sort(), ['":minimal" = "read"', '":minimal" = "read"', '"." = "read"', '"." = "write"'].sort(), at)
+    // In the folder, in either profile, wherever they are and whenever they were made: files named for secrets never,
+    // nor its own settings for the agents celler runs, so one run can't set up what another starts.
+    for (const table of ["host", "host-read"]) {
+      const folder = config.split(`[permissions.${table}.filesystem.":workspace_roots"]\n`)[1].split("\n\n")[0]
+      for (const name of SECRET_NAMES) assert.ok(folder.includes(`"**/${name}" = "deny"`), `${at}, ${table}: ${name}`)
+      for (const name of AGENT_SETTINGS) {
+        for (const row of [`"**/${name}" = "deny"`, `"**/${name}/**" = "deny"`]) assert.ok(folder.includes(row), `${at}, ${table}: ${row}`)
+      }
+    }
     // Beyond the sandbox refused, never asked; no web search, no image read from anywhere, no plugins, hooks or memories.
     assert.match(config, /sandbox_approval = false/, at)
     assert.match(config, /\nweb_search = "disabled"\n/, at)
@@ -162,10 +187,12 @@ test("each harness's settings for each system keep its commands to the folder, o
     if (system === "windows") assert.match(config, /\[windows\]\nsandbox = "elevated"\n/, at)
     for (const purpose of ["work", "read"]) {
       const own = codex.run(p, purpose, "host")
-      // Its places: its scratch written; its toolchain and what the host adds read; secret files in the folder never.
+      // Its places, in the profile it runs in, as Codex's config.toml takes them (`"<path>" = "read" | "write" | "deny"`):
+      // its scratch written; its toolchain and what the host adds read; the temporary folders and secret files, never.
       const profile = own.permissions[purpose === "work" ? "host" : "host-read"].filesystem
-      assert.deepEqual(profile, Object.fromEntries([[p.scratch.root, "write"], ...p.toolchain.map(dir => [dir, "read"]), ...p.readable.map(dir => [dir, "read"])]), `${at}, to ${purpose}`)
-      assert.deepEqual(own.permissions.filesystem, { deny_read: [...p.temps, ...p.secrets] }, `${at}, to ${purpose}`)
+      assert.deepEqual(profile, Object.fromEntries([[p.scratch.root, "write"], ...p.toolchain.map(dir => [dir, "read"]), ...p.readable.map(dir => [dir, "read"]), ...[...p.temps, ...p.secrets].map(place => [place, "deny"])]), `${at}, to ${purpose}`)
+      // Nothing but the two profiles: a table beside them would be a profile of its own, which no run is in.
+      assert.deepEqual(Object.keys(own.permissions), [purpose === "work" ? "host" : "host-read"], `${at}, to ${purpose}`)
       assert.ok(p.scratch.root.startsWith(p.folder + path.sep), at)
       // Its commands' home, temporary folder and caches are its own.
       assert.equal(own.shell_environment_policy.set.HOME, p.scratch.home, at)
@@ -177,7 +204,8 @@ test("each harness's settings for each system keep its commands to the folder, o
       }
     }
     // With no secret file in the folder, the system's temporary folders are still closed.
-    assert.deepEqual(codex.run({ ...p, secrets: [] }, "work", "host").permissions.filesystem, { deny_read: p.temps }, at)
+    const closed = Object.entries(codex.run({ ...p, secrets: [] }, "work", "host").permissions.host.filesystem).filter(([, access]) => access === "deny")
+    assert.deepEqual(closed.map(([place]) => place), p.temps, at)
   }
 })
 
@@ -189,10 +217,23 @@ test("a run's places are its own: secret files found, its toolchain read, nothin
     writeFileSync(path.join(folder, file), "x")
   }
   assert.deepEqual(secretsIn(folder).map(f => path.relative(folder, f)).sort(), [".env", path.join("app", ".env.production"), path.join("certs", "site.pem"), path.join("keys", "id_ed25519")].sort())
-  // The programs on its PATH, and where each is installed, never the home folder or the root.
+  // The programs on its PATH, and where each is installed, by their real paths: never the home folder or the root.
   const prefix = path.join(dir, "tools")
   mkdirSync(path.join(prefix, "bin"), { recursive: true })
-  assert.deepEqual(toolchainOf([path.join(prefix, "bin"), os.homedir(), "relative/bin", path.join(dir, "gone")].join(path.delimiter), os.homedir()), [path.join(prefix, "bin"), prefix])
+  assert.deepEqual(toolchainOf([path.join(prefix, "bin"), os.homedir(), "relative/bin", path.join(dir, "gone")].join(path.delimiter), os.homedir()), [path.join(prefix, "bin"), prefix].map(dir => realpathSync(dir)))
+  // In the person's home: a folder on its PATH, and where its programs are installed, also where one links to; never
+  // a folder right inside the home folder, which holds more than programs (`~/.local`, `~/.cargo`), nor the host's data.
+  const home = path.join(dir, "home")
+  const ruff = path.join(home, ".local", "share", "uv", "tools", "ruff")
+  const nvm = path.join(home, ".nvm", "versions", "node", "v24")
+  const data = path.join(dir, "data")
+  for (const bin of [path.join(home, ".local", "bin"), path.join(ruff, "bin"), path.join(nvm, "bin"), path.join(home, ".cargo", "bin"), path.join(data, "bin")]) mkdirSync(bin, { recursive: true })
+  writeFileSync(path.join(ruff, "bin", "ruff"), "")
+  symlinkSync(path.join(ruff, "bin", "ruff"), path.join(home, ".local", "bin", "ruff"))
+  // Links left behind by what was uninstalled, before and after it: passed over, the others still read.
+  for (const gone of ["a-gone", "q-gone", "z-gone"]) symlinkSync(path.join(home, "nowhere", gone), path.join(home, ".local", "bin", gone))
+  const onPath = [path.join(home, ".local", "bin"), path.join(nvm, "bin"), path.join(home, ".cargo", "bin"), path.join(data, "bin"), home, dir]
+  assert.deepEqual(toolchainOf(onPath.join(path.delimiter), home, data), [path.join(home, ".local", "bin"), ruff, path.join(nvm, "bin"), nvm, path.join(home, ".cargo", "bin"), path.join(data, "bin")].map(dir => realpathSync(dir)))
   // Its environment: what programs need, its own temporary folder and caches; a token in the person's shell, never.
   process.env.CELLER_TEST_TOKEN = "s3cret"
   try {
@@ -213,8 +254,36 @@ test("a run's places are its own: secret files found, its toolchain read, nothin
   const result = await new AgentRuntime(scratching, host).run(spec({ cwd: folder }), () => undefined).done
   assert.equal(result.ok, true, result.error)
   assert.equal(path.dirname(seen[0].root), path.join(folder, ".celler"))
-  await new Promise(r => setTimeout(r, 50))
-  assert.deepEqual(readdirSync(folder).includes(".celler"), false)
+  // Removed in the background, as soon as it can be.
+  await until(() => !readdirSync(folder).includes(".celler"))
+}))
+
+test("a run's short folder is its own, short enough for Claude Code's sockets, and gone with its scratch", () => inFolder(async dir => {
+  const folder = path.join(dir, "work")
+  mkdirSync(folder)
+  const scratch = scratchFor(folder)
+  // Windows has no such limit: there it is its scratch's own temporary folder.
+  if (process.platform === "win32") return assert.equal(scratch.short, scratch.tmp)
+  // In the system's /tmp, by its real path, which only its owner may use; Claude Code's shell's folder in it fits the 44
+  // bytes it allows for its sockets' folder, past which it would use the one all of the person's Claude Code shares.
+  assert.equal(path.dirname(scratch.short), realpathSync("/tmp"))
+  assert.equal(statSync(scratch.short).mode & 0o777, 0o700)
+  assert.ok(Buffer.byteLength(path.join(scratch.short, `claude-${process.getuid()}`)) <= 44, scratch.short)
+  await removeScratch(scratch)
+  assert.equal(existsSync(scratch.short), false)
+}))
+
+test("a run's scratch goes after it even when a tool left read-only folders in it, and removing it never throws", () => inFolder(async dir => {
+  const folder = path.join(dir, "work")
+  mkdirSync(folder)
+  const scratch = scratchFor(folder)
+  // Go's module cache, as `go test` leaves it in the home it was given: folders no one may write in.
+  const module = path.join(scratch.home, "go", "pkg", "mod", "example.com", "x@v1.0.0")
+  mkdirSync(module, { recursive: true })
+  writeFileSync(path.join(module, "x.go"), "package x")
+  for (const dir of [module, path.dirname(module)]) chmodSync(dir, 0o555)
+  await removeScratch(scratch)
+  assert.equal(existsSync(path.join(folder, ".celler")), false)
 }))
 
 test("Codex's health says, in the host's words, when it isn't found and when it isn't signed in for the host", () => inFolder(async dir => {
@@ -380,6 +449,90 @@ test("a model-only decision gets no MCP server, not even the run's own", () => i
   }
 }))
 
+test("what an agent asks before it acts reaches the host with the run it asks in, and with no one to ask it doesn't go ahead", () => inFolder(async dir => {
+  const asked = []
+  const reply = async ask => {
+    const { platform, app, revision } = desk(() => new AgentRuntime(fakeAgent({ FAKE_ACP_LOG: path.join(dir, "agent.jsonl") }), host), ask ? { ask } : {})
+    try {
+      const result = await app.start({ owner: "office", revision, entry: "desk", workspace: dir, input: "Test it" })
+      assert.equal(result.isError, false, JSON.stringify(result))
+      return result.content[0].text
+    } finally {
+      await platform.close()
+    }
+  }
+  // The host answers it, for the run it came from.
+  assert.match(await reply(async (run, q) => (asked.push([run.entry, q.title, q.kind]), { option: "yes" })), /Ran them\.$/)
+  assert.deepEqual(asked, [["desk", "Run the tests", "execute"]])
+  // A host that asks no one: what the agent asks about doesn't happen.
+  assert.match(await reply(undefined), /Didn't run them\.$/)
+}))
+
+test("a deep health check test-runs the agent once, as a model-only run with no tools, and says how it went", () => inFolder(async dir => {
+  const log = path.join(dir, "agent.jsonl")
+  const prompts = () => sentTo(log).filter(e => e.what === "session/prompt")
+  const runtime = new AgentRuntime(fakeAgent({ FAKE_ACP_LOG: log }), host)
+  const healthy = await runtime.health(true)
+  assert.deepEqual([healthy.ok, healthy.detail], [true, "Fake 9.9.9 · test run succeeded"])
+  assert.match(prompts()[0].data.text, /Reply with exactly: OK$/)
+  const opened = sentTo(log).find(e => e.what === "session/new").data
+  assert.deepEqual(opened.servers, [])
+  // In an empty folder of its own, never the temporary folder other programs share, and gone after it.
+  assert.equal(path.dirname(opened.cwd), os.tmpdir())
+  assert.match(path.basename(opened.cwd), /^celler-test-run-/)
+  assert.equal(existsSync(opened.cwd), false)
+  // Without deep, no run at all.
+  assert.deepEqual([(await runtime.health(false)).detail, prompts().length], ["Fake 9.9.9 (not yet test-run)", 1])
+  // A test run that doesn't finish in its time: not healthy, and why.
+  const slow = await new AgentRuntime({ ...fakeAgent({ FAKE_ACP_LOG: log }), testRunMs: 1 }, host).health(true)
+  assert.deepEqual([slow.ok, slow.detail], [false, "Fake 9.9.9 · Timed out after 0 s"])
+}))
+
+test("a run whose agent is gone while the person is asked ends there: its clock doesn't start again to stop it later", () => inFolder(async dir => {
+  const kill = process.kill
+  const grace = harnessLimits.exitGraceMs
+  const killed = []
+  process.kill = (pid, signal) => (killed.push({ pid, at: Date.now() }), kill.call(process, pid, signal))
+  // The grace a stop gives before it insists, short for this test.
+  harnessLimits.exitGraceMs = 50
+  try {
+    const fake = fakeAgent({ FAKE_ACP_LOG: path.join(dir, "agent.jsonl"), FAKE_ACP_EXIT_WHILE_ASKING: "1" })
+    // No one answers; the run's end takes the question back.
+    const ask = (_q, signal) => new Promise(resolve => signal.addEventListener("abort", () => resolve(null), { once: true }))
+    const timeoutMs = 1_000
+    const handle = new AgentRuntime(fake, host).run(spec({ cwd: dir, timeoutMs, ask }), () => undefined)
+    assert.equal((await handle.done).ok, false)
+    const ended = Date.now()
+    // Past its time and the grace a stop gives: what its end stopped (what its commands left running) it stopped at
+    // once, and nothing stopped it later.
+    await delay(timeoutMs + harnessLimits.exitGraceMs + 300)
+    const late = killed.filter(({ pid, at }) => pid === -handle.pid && at > ended + harnessLimits.exitGraceMs + 200)
+    assert.deepEqual(late, [])
+  } finally {
+    process.kill = kill
+    harnessLimits.exitGraceMs = grace
+  }
+}))
+
+test("what a run's commands leave running ends with the run", () => inFolder(async dir => {
+  // Windows keeps no process group to end.
+  if (process.platform === "win32") return
+  const left = path.join(dir, "left.pid")
+  const fake = fakeAgent({ FAKE_ACP_LOG: path.join(dir, "agent.jsonl"), FAKE_ACP_LEAVE_RUNNING: left })
+  const result = await new AgentRuntime(fake, host).run(spec({ cwd: dir, ask: async () => ({ option: "yes" }) }), () => undefined).done
+  assert.equal(result.ok, true, result.error)
+  const pid = Number(readFileSync(left, "utf8"))
+  const running = () => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  await until(() => !running(), 2_000)
+}))
+
 test("cancellation while the host prepares a run prevents the agent from starting", () => inFolder(async dir => {
   const controller = new AbortController()
   let started = false
@@ -406,10 +559,10 @@ test("cancellation while the host prepares a run prevents the agent from startin
 }))
 
 /**
- * A host's office of one cell, `desk`, run by `runtime`, with more of the platform's options if given: its platform,
- * app and revision, and what each run ended with.
+ * A host's office of one cell, `desk`, run by `runtime`, with more of the platform's options and the host's adapters if
+ * given: its platform, app and revision, and what each run ended with.
  */
-function desk(runtime, more = {}) {
+function desk(runtime, more = {}, adapters = new Map()) {
   const ended = []
   const platform = harnessPlatform({
     runtime,
@@ -419,7 +572,7 @@ function desk(runtime, more = {}) {
     ended: (_run, result) => ended.push(result),
     ...more,
   })
-  const app = createApp({ database: new DatabaseSync(":memory:"), platform, adapters: new Map() })
+  const app = createApp({ database: new DatabaseSync(":memory:"), platform, adapters })
   const revision = app.publish([{ kind: "cell", id: "desk", title: "Desk", profile: "any", exports: [] }])
   return { platform, app, revision, ended }
 }
@@ -453,6 +606,138 @@ test("a run stopped through celler keeps no result there, and the host still hea
   try {
     await assert.rejects(app.start({ owner: "office", revision, entry: "desk", workspace: dir, input: "Wait" }, stop.signal))
     assert.deepEqual(ended.map(r => r.cancelled), [true])
+  } finally {
+    await platform.close()
+  }
+}))
+
+test("a host whose hook throws as the agent starts doesn't leave the agent working", () => inFolder(async dir => {
+  let handle
+  const simulated = new SimulatedRuntime()
+  const runtime = { kind: "simulated", health: () => simulated.health(), run: (s, p) => (handle = simulated.run(s, p)) }
+  const { platform, app, revision } = desk(() => runtime, { started: () => { throw new Error("The window is gone") } })
+  try {
+    await assert.rejects(app.start({ owner: "office", revision, entry: "desk", workspace: dir, input: "Go" }), /The window is gone/)
+    assert.equal((await handle.done).cancelled, true)
+  } finally {
+    await platform.close()
+  }
+}))
+
+test("a delegated run that fails tells the agent that called it so in celler's words, never its raw error, which the host hears", () => inFolder(async dir => {
+  const log = path.join(dir, "agent.jsonl")
+  const broken = { kind: "broken", health: async () => ({ ok: false, checkedAt: 0, detail: "" }), run: () => { throw new Error("ENOENT: /Users/someone/host/data.db") } }
+  const { platform, app, ended } = desk(run => (run.profile === "desk" ? new AgentRuntime(fakeAgent({ FAKE_ACP_LOG: log, FAKE_ACP_TOOL: "helper" }), host) : broken))
+  const revision = app.publish([
+    { kind: "cell", id: "desk", title: "Desk", profile: "desk", exports: ["helper"] },
+    { kind: "tool", id: "helper", target: { cell: "child" }, definition: { name: "helper", inputSchema: { type: "object", properties: { text: { type: "string" } } } } },
+    { kind: "cell", id: "child", title: "Child", profile: "child", exports: [] },
+  ])
+  try {
+    const result = await app.start({ owner: "office", revision, entry: "desk", workspace: dir, input: "Ask the helper" })
+    assert.match(result.content[0].text, /The delegated run failed$/)
+    assert.doesNotMatch(result.content[0].text, /ENOENT/)
+    assert.ok(ended.some(r => r.error === "ENOENT: /Users/someone/host/data.db"), JSON.stringify(ended))
+  } finally {
+    await platform.close()
+  }
+}))
+
+test("a platform whose MCP server couldn't open tries again for the next run", () => inFolder(async dir => {
+  // The next server to open fails, once.
+  http.Server.prototype.listen = function () {
+    delete http.Server.prototype.listen
+    process.nextTick(() => this.emit("error", Object.assign(new Error("listen EADDRNOTAVAIL"), { code: "EADDRNOTAVAIL" })))
+    return this
+  }
+  const { platform, app } = desk(() => new AgentRuntime(fakeAgent({ FAKE_ACP_LOG: path.join(dir, "agent.jsonl"), FAKE_ACP_TOOL: "echo" }), host), {}, new Map([["echo", echo]]))
+  const revision = app.publish([{ kind: "cell", id: "desk", title: "Desk", profile: "fake", exports: ["echo"] }, { kind: "tool", id: "echo", ...echoTool }])
+  const start = () => app.start({ owner: "office", revision, entry: "desk", workspace: dir, input: "Use echo" })
+  try {
+    await assert.rejects(start(), /EADDRNOTAVAIL/)
+    assert.match((await start()).content[0].text, /echo: hi$/)
+  } finally {
+    delete http.Server.prototype.listen
+    await platform.close()
+  }
+}))
+
+test("a cell's context reaches its agent as text, a resource's text too, and context with no text fails the run in celler's words", () => inFolder(async dir => {
+  const log = path.join(dir, "agent.jsonl")
+  const { platform, app } = desk(() => new AgentRuntime(fakeAgent({ FAKE_ACP_LOG: log }), host))
+  const deskWith = context => app.publish([{ kind: "cell", id: "desk", title: "Desk", profile: "any", exports: [], context }])
+  const start = revision => app.start({ owner: "office", revision, entry: "desk", workspace: dir, input: "Go" })
+  try {
+    await start(deskWith(["Be brief.", { type: "resource", resource: { uri: "policy://mail", text: "Never email customers." } }]))
+    assert.match(sentTo(log).find(e => e.what === "session/prompt").data.text, /^Be brief\.\n\nNever email customers\.[\s\S]*Go$/)
+    const image = await start(deskWith([{ type: "image", data: "AAAA", mimeType: "image/png" }]))
+    assert.deepEqual([image.isError, image.content[0].text], [true, "A cell's context can't hold image content for an agent run by the harness: only text"])
+  } finally {
+    await platform.close()
+  }
+}))
+
+test("an agent's MCP session lasts from one request to the next: a call it makes as a task gives its result when asked for later", () => inFolder(async dir => {
+  // An agent that calls a task-only tool as a task, then asks for its result in a request of its own.
+  const tasked = {
+    kind: "tasked",
+    health: async () => ({ ok: true, checkedAt: 0, detail: "" }),
+    run: s => ({
+      cancel: () => undefined,
+      done: (async () => {
+        const [server] = s.mcpServers
+        const client = new Client({ name: "agent", version: "1" })
+        await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }))
+        try {
+          const { task } = await client.request({ method: "tools/call", params: { name: "slow", arguments: {}, task: { ttl: 5_000 } } }, CreateTaskResultSchema)
+          const result = await client.experimental.tasks.getTaskResult(task.taskId, CallToolResultSchema)
+          return { ok: true, text: result.content[0].text, usage: {}, costUsd: null, permissionDenials: [] }
+        } finally {
+          await client.close()
+        }
+      })(),
+    }),
+  }
+  const quick = { call: async () => ({ content: [{ type: "text", text: "quick" }] }) }
+  const { platform, app } = desk(() => tasked, {}, new Map([["quick", quick]]))
+  const revision = app.publish([
+    { kind: "cell", id: "desk", title: "Desk", profile: "tasked", exports: ["slow"] },
+    { kind: "tool", id: "slow", target: { adapter: "quick" }, definition: { name: "slow", inputSchema: { type: "object" }, execution: { taskSupport: "required" } } },
+  ])
+  try {
+    const result = await app.start({ owner: "office", revision, entry: "desk", workspace: dir, input: "x" })
+    assert.deepEqual([result.isError, result.content[0].text], [false, "quick"])
+  } finally {
+    await platform.close()
+  }
+}))
+
+test("a call still going when its run ends hears that it was cut off: the run's session closes only after", () => inFolder(async dir => {
+  // An agent that ends its run while its own call still waits, and stays to hear what became of the call.
+  let call
+  const leaving = {
+    kind: "leaving",
+    health: async () => ({ ok: true, checkedAt: 0, detail: "" }),
+    run: s => ({
+      cancel: () => undefined,
+      done: (async () => {
+        const [server] = s.mcpServers
+        const client = new Client({ name: "agent", version: "1" })
+        await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }))
+        call = client.callTool({ name: "wait", arguments: {} }).finally(() => client.close())
+        await delay(100)
+        return { ok: true, text: "Done", usage: {}, costUsd: null, permissionDenials: [] }
+      })(),
+    }),
+  }
+  // A call that lasts until the run that made it ends.
+  const wait = { call: (_run, _args, signal) => new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true })) }
+  const { platform, app } = desk(() => leaving, {}, new Map([["wait", wait]]))
+  const revision = app.publish([{ kind: "cell", id: "desk", title: "Desk", profile: "leaving", exports: ["wait"] }, { kind: "tool", id: "wait", target: { adapter: "wait" }, definition: { name: "wait", inputSchema: { type: "object" } } }])
+  try {
+    assert.equal((await app.start({ owner: "office", revision, entry: "desk", workspace: dir, input: "x" })).content[0].text, "Done")
+    const heard = await Promise.race([call.then(() => "answered", error => error.message), delay(2_000).then(() => "nothing")])
+    assert.match(heard, /aborted/)
   } finally {
     await platform.close()
   }

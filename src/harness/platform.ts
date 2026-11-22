@@ -1,13 +1,14 @@
 // A Platform for createApp that runs each run's agent through the harness. The agent reaches its run's MCP server at
-// a local address, one request at a time; what it does and asks goes to the host; its result is the run's.
+// a local address, in MCP sessions of its own; what it does and asks goes to the host; its result is the run's.
 
-import { randomBytes } from "node:crypto"
+import { randomBytes, randomUUID } from "node:crypto"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import type { Platform } from "../app.js"
+import { harnessLimits } from "../limits.js"
 import { errorText, failure, type AgentAsk, type AskAnswer, type McpServerSpec, type RunHandle, type RunProgress, type RunResult, type RunSpec, type Runtime } from "./types.js"
 
 /** A run as `launch` gets it: the run, its cell's profile and context, and the input it was started with. */
@@ -18,7 +19,10 @@ export interface HarnessPlatform {
   runtime(run: Launched): Runtime | undefined
   /** The live policy, as createApp asks it. */
   allowed: Platform["allowed"]
-  /** The harness run for a run: its prompt, model, session and the rest, from what the host started it with. */
+  /**
+   * The harness run for a run: its prompt, model, session and the rest, from what the host started it with. Its
+   * `mcpServers` are the host's own, beside the run's: their calls don't go through celler, so each checks its own.
+   */
   spec(run: Launched): Omit<RunSpec, "cwd" | "systemPrompt" | "mcpServers" | "ask"> & { mcpServers?: McpServerSpec[] }
   /** The name the agent knows the run's MCP server by: its tools are that server's. */
   server: string
@@ -34,12 +38,53 @@ export interface HarnessPlatform {
 
 /** The cell's context as the agent's instructions: its texts, in order. */
 function instructions(context: Launched["context"]): string {
-  return context.flatMap((part) => (typeof part === "string" ? [part] : part.type === "text" ? [part.text] : [])).join("\n\n")
+  return context.map(textOf).join("\n\n")
+}
+
+/** A part of a cell's context as text; one with none, such as an image, can't be part of an agent's instructions. */
+function textOf(part: Launched["context"][number]): string {
+  if (typeof part === "string") return part
+  if (part.type === "text") return part.text
+  if (part.type === "resource" && "text" in part.resource) return part.resource.text
+  throw new Error(`A cell's context can't hold ${part.type} content for an agent run by the harness: only text`)
+}
+
+/**
+ * A run's result as createApp gets it. The host's own run carries all of it: the host keeps its usage, cost, session
+ * and what was refused. A delegated run's goes to the agent that called it, which sees only its agent's reply, or that
+ * it failed in celler's own words, never a raw error of the host's or an agent's: the host hears it all in `ended`.
+ */
+function resultFor(run: Launched, result: RunResult): CallToolResult {
+  if (!run.parent) {
+    return { isError: !result.ok, content: [{ type: "text", text: result.text || result.error || "" }], structuredContent: { ...result } }
+  }
+  if (result.ok) return { content: [{ type: "text", text: result.text }] }
+  return { isError: true, content: [{ type: "text", text: result.cancelled ? "The delegated run was cancelled" : "The delegated run failed" }] }
+}
+
+/**
+ * A run's way in to its MCP server: how a connection is made, the sessions its agent has open, by their ids, and
+ * whether the run is over, after which no session is kept.
+ */
+type Way = { connect: (transport: Transport) => Promise<void>; sessions: Map<string, StreamableHTTPServerTransport>; closed: boolean }
+
+/**
+ * No more sessions for a run, and the ones it has closed: at once, or after `graceMs`, so that the calls its end cut off
+ * are answered first.
+ */
+function closeSessions(way: Way, graceMs = 0): void {
+  way.closed = true
+  const close = () => {
+    for (const transport of way.sessions.values()) void transport.close()
+    way.sessions.clear()
+  }
+  if (graceMs === 0) close()
+  else setTimeout(close, graceMs).unref()
 }
 
 export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promise<void> } {
-  // Each run's way in: a token of its own, which only that run's agent is given.
-  const runs = new Map<string, (transport: Transport) => Promise<void>>()
+  // Each run's way in, by a token of its own, which only that run's agent is given.
+  const runs = new Map<string, Way>()
   // The agents going, which close() stops.
   const going = new Set<{ cancel(): void }>()
   let http: Server | undefined
@@ -47,23 +92,56 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
 
   async function serve(req: IncomingMessage, res: ServerResponse) {
     const token = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1]
-    const connect = token ? runs.get(token) : undefined
-    if (!connect || new URL(req.url ?? "/", "http://local").pathname !== "/mcp") return void res.writeHead(404).end()
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-    res.on("close", () => void transport.close())
+    const way = token ? runs.get(token) : undefined
+    if (!way || new URL(req.url ?? "/", "http://local").pathname !== "/mcp") return void res.writeHead(404).end()
     try {
-      await connect(transport)
+      const transport = await sessionFor(way, req.headers["mcp-session-id"])
+      if (!transport) return void res.writeHead(404).end()
       await transport.handleRequest(req, res)
+      // A request that opened no session (anything but an initialize) leaves nothing behind.
+      if (!transport.sessionId) void transport.close()
     } catch {
       if (!res.headersSent) res.writeHead(500).end()
     }
   }
 
+  /**
+   * The session a request is in: the one it names, or a new one. A session lasts while its agent keeps it, so what it
+   * was listed and the tasks it started go on from one request to the next; one that has ended is gone (404).
+   */
+  async function sessionFor(way: Way, id: string | string[] | undefined): Promise<StreamableHTTPServerTransport | undefined> {
+    if (id !== undefined) return typeof id === "string" ? way.sessions.get(id) : undefined
+    const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (opened) => {
+        // One that opens as its run ends is closed, not kept.
+        if (way.closed) void transport.close()
+        else way.sessions.set(opened, transport)
+      },
+    })
+    // Set before connecting, which keeps it: the server's own goes after it.
+    transport.onclose = () => {
+      if (transport.sessionId) way.sessions.delete(transport.sessionId)
+    }
+    await way.connect(transport)
+    return transport
+  }
+
   function listening(): Promise<string> {
     address ??= new Promise((resolve, reject) => {
-      http = createServer((req, res) => void serve(req, res))
-      http.once("error", reject)
-      http.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${(http!.address() as AddressInfo).port}/mcp`))
+      const server = createServer((req, res) => void serve(req, res))
+      // One that couldn't open isn't kept: the next run tries again.
+      const failed = (err: Error) => {
+        address = undefined
+        http = undefined
+        reject(err)
+      }
+      server.once("error", failed)
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", failed)
+        resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`)
+      })
+      http = server
     })
     return address
   }
@@ -77,7 +155,8 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
       const token = randomBytes(24).toString("base64url")
       // An agent that searches its tools itself is given them all; any other gets celler's menu.
       const native = runtime.nativeDiscovery === true
-      runs.set(token, (transport) => connect(transport, native))
+      const way: Way = { connect: (transport) => connect(transport, native), sessions: new Map(), closed: false }
+      runs.set(token, way)
       try {
         const own = o.spec(run)
         // A model-only decision has no tools: no MCP server, not even the run's own.
@@ -104,24 +183,28 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
           // An agent that can't start ends as a failed run, which the host hears as it would any end.
           const result = failure(errorText(err))
           o.ended?.(run, result)
-          return { isError: true, content: [{ type: "text", text: result.error ?? "" }], structuredContent: { ...result } }
+          return resultFor(run, result)
         }
         going.add(handle)
         const cancel = () => handle.cancel()
         signal.addEventListener("abort", cancel, { once: true })
         if (signal.aborted) cancel()
+        let result: RunResult | undefined
         try {
           o.started?.(run, handle.pid)
-          const result = await handle.done
+          result = await handle.done
           o.ended?.(run, result)
-          // The whole result goes back with it: the host keeps its usage, cost, session and what was refused.
-          return { isError: !result.ok, content: [{ type: "text", text: result.text || result.error || "" }], structuredContent: { ...result } }
+          return resultFor(run, result)
         } finally {
+          // A host's hook that threw before the run ended: its agent is stopped too, not left working.
+          if (!result) handle.cancel()
           going.delete(handle)
           signal.removeEventListener("abort", cancel)
         }
       } finally {
         runs.delete(token)
+        // The grace its agent has to exit: what it was still waiting on hears that it was cut off.
+        closeSessions(way, harnessLimits.exitGraceMs)
       }
     },
     /**
@@ -130,10 +213,17 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
      */
     async close() {
       for (const handle of going) handle.cancel()
+      for (const way of runs.values()) closeSessions(way)
       const server = http
       http = undefined
       address = undefined
-      if (server) await new Promise<void>((resolve) => server.close(() => resolve()))
+      if (server) {
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve())
+          // Requests still open (an agent waiting on its call) end with it.
+          server.closeAllConnections()
+        })
+      }
     },
   }
 }

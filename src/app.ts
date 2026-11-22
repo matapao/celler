@@ -82,11 +82,10 @@ function checkedResult(current: Graph, id: string, value: unknown): CallToolResu
 const hash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex")
 const codeOf = (error: unknown) => (error instanceof CellerError ? error.code : undefined)
 
-// Without `celler/call-id`, the tool and arguments are the key, so a blind retry joins the first call's approval
-// or child run.
-function callKey(meta: Record<string, unknown> | undefined, tool: string, args: Args): string {
+/** The client's own key for a call, if it gave one: a malformed one is its mistake, answered as a protocol error. */
+function callIdOf(meta: Record<string, unknown> | undefined): string | undefined {
   const key = meta?.["celler/call-id"]
-  if (key === undefined) return hash([tool, args])
+  if (key === undefined) return undefined
   if (typeof key !== "string" || key.length === 0 || key.length > 128 || /[\x00-\x1f\x7f]/.test(key)) {
     throw new McpError(ErrorCode.InvalidParams, "Invalid celler/call-id metadata key")
   }
@@ -96,7 +95,7 @@ function callKey(meta: Record<string, unknown> | undefined, tool: string, args: 
 // Failures return as results the model can read and act on (MCP 2025-11-25). Only this library's own messages
 // show: raw host, adapter and SQLite errors never reach the harness.
 function refusal(error: unknown): CallToolResult {
-  const text = error instanceof CellerError || error instanceof McpError ? error.message : "Tool execution failed"
+  const text = error instanceof CellerError ? error.message : "Tool execution failed"
   return { isError: true, content: [{ type: "text", text }] }
 }
 
@@ -360,25 +359,27 @@ export function createApp(options: AppOptions) {
       return { tools: [...tools.filter(tool => pins.has(tool.name)), discoverTool, invokeTool] }
     }
 
-    function list() {
-      const result = menu()
-      advertised = new Set(result.tools.map(tool => tool.name))
-      return result
+    // The tools this connection is listed, in celler's words when the host's policy or the database fails: never raw
+    // errors across the MCP boundary.
+    function list(signal: AbortSignal) {
+      try {
+        const result = menu()
+        advertised = new Set(result.tools.map(tool => tool.name))
+        return result
+      } catch (error) {
+        if (error instanceof CellerError || signal.aborted) throw error
+        fail("UNAVAILABLE", "Tool listing failed")
+      }
     }
 
-    server.setRequestHandler(ListToolsRequestSchema, (_request, extra) => {
-      try {
-        return list()
-      } catch (error) {
-        if (error instanceof CellerError || extra.signal.aborted) throw error
-        fail("UNAVAILABLE", "Tool listing failed") // never pass raw errors across the MCP boundary
-      }
-    })
+    server.setRequestHandler(ListToolsRequestSchema, (_request, extra) => list(extra.signal))
     server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
-      if (!advertised) list()
+      if (!advertised) list(extra.signal)
       if (!advertised!.has(params.name)) throw new McpError(ErrorCode.InvalidParams, "Unknown tool: " + params.name)
+      const callId = callIdOf(params._meta)
       // The request or task, the connection, or the run can end this call. Approvals and delegated runs outlive it.
       const owned = store.ended(run.id) ? [] : [lifetime(run.id)]
+      // Whatever goes wrong from here, an adapter's or the host's own error too, the model reads in celler's words.
       async function respond(signal: AbortSignal, heartbeat?: () => void): Promise<CallToolResult> {
         try {
           const args = params.arguments ?? {}
@@ -389,10 +390,12 @@ export function createApp(options: AppOptions) {
           const request = params.name === "invoke"
             ? parseWith(invocation, "invoke arguments", args)
             : { name: params.name, arguments: args }
-          const key = callKey(params._meta, request.name, request.arguments)
+          // Without `celler/call-id`, the tool and arguments are the key, so a blind retry joins the first call's
+          // approval or child run.
+          const key = callId ?? hash([request.name, request.arguments])
           return await call(run, request.name, request.arguments, key, signal, { heartbeat, asTask: !!params.task })
         } catch (error) {
-          if (error instanceof McpError || signal.aborted) throw error
+          if (signal.aborted) throw error
           return refusal(error)
         }
       }
@@ -425,6 +428,8 @@ export function createApp(options: AppOptions) {
     group.add(server)
     server.onclose = () => {
       connection.abort()
+      // Its tasks were this connection's alone: nothing can ask for them now, and their timers would outlive it.
+      tasks.cleanup()
       group.delete(server)
       if (group.size === 0 && connections.get(run.id) === group) connections.delete(run.id)
     }

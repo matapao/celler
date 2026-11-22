@@ -1,5 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { setTimeout as delay } from "node:timers/promises"
+import { ErrorCode, McpError, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js"
 import { createApp } from "celler"
 import { cell, discover, memoryDatabase, object, refused, request, text, tool, until, withClient } from "./support.mjs"
 
@@ -154,6 +156,40 @@ test("a connection given the menu keeps it when what it may use shrinks, so the 
     tool("small", { adapter: "ok" }),
     tool("big", { adapter: "ok" }, { description: "x".repeat(2_000) })])
   assert.deepEqual(await app.start(request(revision)), text("done"))
+})
+
+test("a change to what runs may use is told to the connections of the run named, or of every run", async t => {
+  const database = memoryDatabase(t)
+  const heard = { first: 0, second: 0 }
+  const runs = {}
+  let release
+  const going = new Promise(resolve => { release = resolve })
+  const app = createApp({
+    database,
+    adapters: new Map([["ok", { call: async () => text("ok") }]]),
+    platform: {
+      allowed: () => true,
+      launch: (spec, connect) => withClient(connect, async client => {
+        client.setNotificationHandler(ToolListChangedNotificationSchema, () => { heard[spec.input]++ })
+        await client.listTools()
+        runs[spec.input] = spec.id
+        await going
+        return text(spec.input)
+      }),
+    },
+  })
+  const revision = app.publish([cell("root", ["t1"]), tool("t1", { adapter: "ok" })])
+  const first = app.start({ ...request(revision), input: "first" })
+  const second = app.start({ ...request(revision), input: "second" })
+  await until(() => runs.first && runs.second)
+  await app.notifyToolsChanged(runs.first)
+  await until(() => heard.first === 1)
+  await delay(50)
+  assert.equal(heard.second, 0)
+  await app.notifyToolsChanged()
+  await until(() => heard.first === 2 && heard.second === 1)
+  release()
+  assert.deepEqual([await first, await second], [text("first"), text("second")])
 })
 
 test("cell-scoped policies, BFS order, pagination, nativeDiscovery, limits, and MCP error sanitization", async t => {
@@ -327,7 +363,7 @@ test("a delegated run is checked up its chain at each call: the parent's way to 
   assert.deepEqual(await app.start(request(revision)), text("child done"))
 })
 
-test("a policy that throws reaches the agent only in celler's words, while listing or calling", async t => {
+test("a policy that throws reaches the agent only in celler's words, while listing or calling, listed first or not", async t => {
   const database = memoryDatabase(t)
   let broken = false
   const app = createApp({
@@ -338,17 +374,41 @@ test("a policy that throws reaches the agent only in celler's words, while listi
         if (broken) throw Error("postgres://user:supersecret@10.0.0.5/db")
         return true
       },
-      launch: (_spec, connect) => withClient(connect, async client => {
+      launch: (spec, connect) => withClient(connect, async client => {
         assert.ok((await client.listTools()).tools.some(x => x.name === "look"))
         broken = true
         const heard = await client.callTool({ name: "look", arguments: {} })
         assert.deepEqual(heard, { isError: true, content: [{ type: "text", text: "Tool execution failed" }] })
-        await assert.rejects(client.listTools(), error => /Tool listing failed/.test(error.message) && !/supersecret|10\.0\.0\.5/.test(error.message))
+        const inCellerWords = error => /Tool listing failed/.test(error.message) && !/supersecret|10\.0\.0\.5/.test(error.message)
+        await assert.rejects(client.listTools(), inCellerWords)
+        // A new connection that calls a tool it knows without listing first, as one does after it starts a new session.
+        await withClient((ch, n) => app.reconnect("alice", spec.id, ch, n), async fresh => {
+          await assert.rejects(fresh.callTool({ name: "look", arguments: {} }), inCellerWords)
+        }, true)
         return text("done")
       }, true),
     },
   })
   const revision = app.publish([cell("root", ["look"]), tool("look", { adapter: "ok" })])
+  assert.deepEqual(await app.start(request(revision)), text("done"))
+})
+
+test("an adapter's own MCP error reaches the agent only in celler's words, as a result it can read", async t => {
+  const database = memoryDatabase(t)
+  const upstream = new McpError(ErrorCode.InternalError, "upstream db postgres://svc:hunter2@10.0.0.7/prod", { stack: "at secret.js:1" })
+  const app = createApp({
+    database,
+    adapters: new Map([["upstream", { call: async () => { throw upstream } }]]),
+    platform: {
+      allowed: () => true,
+      launch: (_spec, connect) => withClient(connect, async client => {
+        const heard = await client.callTool({ name: "look", arguments: {} })
+        assert.deepEqual(heard, { isError: true, content: [{ type: "text", text: "Tool execution failed" }] })
+        return text("done")
+      }, true),
+    },
+  })
+  const revision = app.publish([cell("root", ["look"]), tool("look", { adapter: "upstream" })])
   assert.deepEqual(await app.start(request(revision)), text("done"))
 })
 

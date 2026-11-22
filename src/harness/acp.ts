@@ -80,6 +80,12 @@ function outside(file: string, folder: string): boolean {
   }
 }
 
+/** A run's time as people say it: in whole minutes, else in seconds. */
+function duration(ms: number): string {
+  const seconds = Math.round(ms / 1000)
+  return seconds > 0 && seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds} s`
+}
+
 /** Stops a process and everything it started: asks, then insists. */
 export function killTree(child: ChildProcess): void {
   const pid = child.pid
@@ -353,13 +359,16 @@ export function runAcp({ spec, host, launch, env, mcpServers, start, label, logi
 
   let sessionId: string | null = null
   let stopped: "cancelled" | "timed out" | null = null
-  // The run's clock stands still while the person is asked; a run that stops takes its asks back.
+  // The run's clock stands still while the person is asked. A run that is over, stopped or ended, takes its asks back:
+  // then its clock never starts again, and nothing stops it any more.
   const asking = new AbortController()
+  const over = () => asking.signal.aborted
   let deadline = Date.now() + spec.timeoutMs
   let waiting = 0
   let pausedAt = 0
   let timer: NodeJS.Timeout | undefined
   const arm = () => {
+    if (over()) return
     clearTimeout(timer)
     timer = setTimeout(() => stop("timed out"), Math.max(0, deadline - Date.now()))
   }
@@ -371,7 +380,7 @@ export function runAcp({ spec, host, launch, env, mcpServers, start, label, logi
     try {
       return await asked()
     } finally {
-      if (--waiting === 0 && !stopped) {
+      if (--waiting === 0) {
         deadline += Date.now() - pausedAt
         arm()
       }
@@ -385,10 +394,12 @@ export function runAcp({ spec, host, launch, env, mcpServers, start, label, logi
     .connect(ndJsonStream(Writable.toWeb(child.stdin!), Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>))
   // Asks the agent to end its turn (the session stays resumable), and stops it if it doesn't exit.
   const stop = (why: "cancelled" | "timed out") => {
-    stopped ??= why
+    if (over()) return
+    stopped = why
     asking.abort()
     if (sessionId) void conn.agent.notify("session/cancel", { sessionId }).catch(() => undefined)
-    setTimeout(() => killTree(child), L.exitGraceMs)
+    const insist = setTimeout(() => killTree(child), L.exitGraceMs)
+    void exited.then(() => clearTimeout(insist))
   }
   arm()
 
@@ -435,7 +446,7 @@ export function runAcp({ spec, host, launch, env, mcpServers, start, label, logi
     const failure = (error: string, runtimeDown = false) => result({ ok: false, error, runtimeDown })
     // Only a sign-in problem before anything was spent takes the whole runtime offline.
     const signIn = (msg: string) => authProblem(msg) && turn.costUsd === null
-    const ended = (usage = emptyUsage()) => (stopped === "cancelled" ? result({ ok: false, cancelled: true, error: "Cancelled", usage }) : result({ ok: false, error: `Timed out after ${Math.round(spec.timeoutMs / 60000)} min`, usage }))
+    const ended = (usage = emptyUsage()) => (stopped === "cancelled" ? result({ ok: false, cancelled: true, error: "Cancelled", usage }) : result({ ok: false, error: `Timed out after ${duration(spec.timeoutMs)}`, usage }))
     try {
       const res = await Promise.race([converse(), exited.then(() => Promise.reject(new AgentExited()))])
       const usage = acpUsage(res?.usage)
@@ -465,10 +476,14 @@ export function runAcp({ spec, host, launch, env, mcpServers, start, label, logi
       asking.abort()
       conn.close()
       child.stdin!.end()
+      // What its commands left running ends with it, once it has exited, or after its grace if it lingers.
       const lingering = setTimeout(() => killTree(child), L.exitGraceMs)
-      void exited.then(() => clearTimeout(lingering))
+      void exited.then(() => {
+        clearTimeout(lingering)
+        killTree(child)
+      })
     }
   })()
 
-  return { pid: child.pid, done, cancel: () => void (stopped || stop("cancelled")) }
+  return { pid: child.pid, done, cancel: () => stop("cancelled") }
 }

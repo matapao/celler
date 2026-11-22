@@ -6,14 +6,15 @@
 // - every command runs in the sandbox, none outside it, and where the sandbox can't start, nothing runs;
 // - commands reach no network at all: everything outside the computer goes through the host's tools (MCP);
 // - they write only in the run's folder (only at work), its own scratch folder inside it, and its shell's own temporary
-//   folder, which its sandbox gives its commands and Claude Code can't do without (its working folder after each command);
+//   folder, which its sandbox gives its commands and Claude Code can't do without (its working folder after each
+//   command); never the folder's own settings for the agents celler runs;
 // - they read the folder, the system and the programs on its PATH, never the person's home, the host's data or the
 //   system's other temporary folders, which other programs share;
 // - files named for secrets are closed to them and to its own file tools, and the connectors' values to its commands;
 // - its own web fetch and web search are off: a web page is a tool of the host's too.
 
 import type { Places } from "./places.js"
-import { SECRET_NAMES } from "./places.js"
+import { AGENT_SETTINGS, SECRET_NAMES } from "./places.js"
 
 export default function claudeOnWindows(p: Places, purpose: "work" | "read") {
   return {
@@ -25,9 +26,9 @@ export default function claudeOnWindows(p: Places, purpose: "work" | "read") {
       filesystem: {
         // Never read: the person's home, the host's data, the system's temporary folders, and secret files in the folder.
         denyRead: [p.home, ...(p.data ? [p.data] : []), ...p.temps, ...p.secrets],
-        // Read again inside those: the folder (its scratch in it), its shell's own temporary folder, the programs on its
-        // PATH, and what the host adds.
-        allowRead: [p.folder, ...p.toolchain, ...p.readable],
+        // Read again inside those: the folder (its scratch in it), the run's short folder (its shell's temporary one),
+        // the programs on its PATH, and what the host adds.
+        allowRead: [p.folder, p.scratch.short, ...p.toolchain, ...p.readable],
         // Written: the folder at work, else only its own scratch in it (and its shell's own temporary folder, which its
         // sandbox adds itself). Nothing else: what isn't on this list can't be written.
         allowWrite: purpose === "work" ? [p.folder] : [p.scratch.root],
@@ -46,10 +47,15 @@ export default function claudeOnWindows(p: Places, purpose: "work" | "read") {
       permissions: {
         // Its commands, every one in the sandbox, which keeps them to all of the above: none waits for the person.
         allow: ["Bash"],
-        // Its own file tools: in the folder only, and never a secret file there.
+        // Its own file tools: in the folder only, and never a secret file there. Claude Code puts these deny rules into
+        // its sandbox too, so its commands can't read or write such a file anywhere in the folder either.
         blockReadsOutsideWorkingDirectories: true,
         blockWritesOutsideWorkingDirectories: true,
-        deny: SECRET_NAMES.flatMap((name) => [`Read(**/${name})`, `Edit(**/${name})`]),
+        deny: [
+          ...SECRET_NAMES.flatMap((name) => [`Read(**/${name})`, `Edit(**/${name})`]),
+          // The folder's own settings for the agents celler runs: read, never written (AGENT_SETTINGS).
+          ...AGENT_SETTINGS.flatMap((name) => [`Edit(**/${name})`, `Edit(**/${name}/**)`]),
+        ],
       },
       disableClaudeAiConnectors: true, // only the host's connectors, not the person's claude.ai ones
       autoMemoryEnabled: false, // nothing carried from one run to the next
@@ -58,7 +64,8 @@ export default function claudeOnWindows(p: Places, purpose: "work" | "read") {
     disallowedTools: ["WebFetch", "WebSearch", ...(purpose === "read" ? ["Edit", "Write", "MultiEdit", "NotebookEdit"] : [])],
     // At work, edits in the folder go ahead; to read, nothing of its own would ask. Anything else asks the person.
     mode: purpose === "work" ? "acceptEdits" : "default",
-    // Its own temporary folder in its scratch, in the folder: where its sandbox gives its commands theirs too.
-    env: { CLAUDE_CODE_TMPDIR: p.scratch.tmp },
+    // Its own temporary folder, the run's short one (here its scratch's: Windows needs no short path), where its
+    // sandbox gives its commands theirs; and git with no personal settings: the person's own can't be read here.
+    env: { CLAUDE_CODE_TMPDIR: p.scratch.short, GIT_CONFIG_GLOBAL: "NUL" },
   }
 }

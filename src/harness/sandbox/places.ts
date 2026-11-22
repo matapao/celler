@@ -3,7 +3,8 @@
 // they must never read or write. Worked out once, as the run starts; the settings files only put these into each
 // harness's own words.
 
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmdirSync, statSync } from "node:fs"
+import { chmod, readdir, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -12,9 +13,11 @@ export interface Places {
   folder: string
   /**
    * The run's own, inside its folder (SCRATCH): its temporary files (`tmp`), and programs' home (`home`) and caches
-   * (`cache`). Made as it starts, removed after it.
+   * (`cache`). And a folder of its own with a short path (`short`), for what can't have a long one: Claude Code's shell
+   * keeps its temporary files and sockets there. On macOS and Linux it is in /tmp, outside the folder; Windows has no
+   * such limit, and it is the run's `tmp`. Made as it starts, removed after it.
    */
-  scratch: { root: string; tmp: string; home: string; cache: string }
+  scratch: { root: string; tmp: string; home: string; cache: string; short: string }
   /** The system's temporary folders, which other programs share: never read or written. */
   temps: string[]
   /** The person's home folder: never read. */
@@ -39,6 +42,14 @@ export const SECRET_NAMES = [
   ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa", "id_rsa.*", "id_ecdsa", "id_ecdsa.*", "id_ed25519",
   "id_ed25519.*", ".npmrc", ".netrc", ".pypirc", ".git-credentials",
 ]
+
+/**
+ * A folder's own settings for the agents celler runs, which they load from it and may start programs from outside any
+ * sandbox (a Codex MCP server in `.codex/config.toml`, a Claude Code hook): never written by a run's commands, wherever
+ * they are in its folder, so one run can't set up what the next, or the person's own agent, starts. Codex's sandbox
+ * takes such patterns only to deny, so its commands don't read them either.
+ */
+export const AGENT_SETTINGS = [".codex", ".agents", ".claude", ".mcp.json"]
 
 /** Folders a search for secret files doesn't go into: what tools fetch and make, and the repository's own data. */
 const NOT_SEARCHED = new Set(["node_modules", ".git", ".desks", ".celler", "vendor", "dist", "build", ".venv", "venv", "__pycache__"])
@@ -75,26 +86,67 @@ export function secretsIn(folder: string): string[] {
 }
 
 /**
- * The programs on a PATH, as folders to read: each that is there, and where it is installed, the folder above a `bin`
- * (`~/.nvm/versions/node/v24/bin` is in `~/.nvm/versions/node/v24`), never the home folder or the root itself.
+ * The programs on a PATH, as folders to read, by their real paths: each folder on it that is there, and where its
+ * programs are installed. That is the folder above a `bin` (`~/.nvm/versions/node/v24` for its `bin`), and for a folder
+ * in the person's home, the folders its programs link to (`~/.local/bin/ruff` to `~/.local/share/uv/tools/ruff/bin/ruff`
+ * is `~/.local/share/uv/tools/ruff`). Never the root or a folder that is or holds the person's home or the host's data,
+ * and never a folder right inside the home folder (`~/.local`, `~/.cargo`): those hold more than programs.
  */
-export function toolchainOf(pathVariable: string, home: string): string[] {
+export function toolchainOf(pathVariable: string, home: string, data: string | null = null): string[] {
+  const homeFolder = realOr(home)
+  const dataFolder = data ? realOr(data) : null
+  const root = path.parse(homeFolder).root
+  const closed = (dir: string) => dir === root || inside(dir, homeFolder) || (dataFolder !== null && inside(dir, dataFolder))
+  const isInstall = (dir: string) => !closed(dir) && path.dirname(dir) !== homeFolder
   const out = new Set<string>()
-  const root = path.parse(home).root
-  for (const dir of pathVariable.split(path.delimiter)) {
-    if (!dir || !path.isAbsolute(dir)) continue
-    try {
-      if (!statSync(dir).isDirectory()) continue
-    } catch {
-      continue
+  for (const entry of pathVariable.split(path.delimiter)) {
+    const dir = path.isAbsolute(entry) ? realFolder(entry) : null
+    if (!dir || closed(dir) || out.has(dir)) continue
+    out.add(dir)
+    const linked = inside(homeFolder, dir) ? linkedFrom(dir).map((program) => path.dirname(program)) : []
+    for (const folder of [dir, ...linked]) {
+      const installed = installFolder(folder)
+      if (isInstall(installed)) out.add(installed)
     }
-    const resolved = path.resolve(dir)
-    if (resolved === home || resolved === root) continue
-    out.add(resolved)
-    const above = path.dirname(resolved)
-    if (/^s?bin$/i.test(path.basename(resolved)) && above !== home && above !== root) out.add(above)
   }
   return [...out]
+}
+
+const realOr = (place: string) => realFolder(place) ?? path.resolve(place)
+
+/** A folder by its real path, or null when there is none. */
+function realFolder(dir: string): string | null {
+  try {
+    const real = realpathSync(dir)
+    return statSync(real).isDirectory() ? real : null
+  } catch {
+    return null
+  }
+}
+
+/** Where the programs that are links in a folder really are; a broken link is passed over. */
+function linkedFrom(dir: string): string[] {
+  let entries: import("node:fs").Dirent[]
+  try {
+    entries = readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const programs: string[] = []
+  for (const entry of entries) {
+    if (!entry.isSymbolicLink()) continue
+    try {
+      programs.push(realpathSync(path.join(dir, entry.name)))
+    } catch {
+      // A broken link.
+    }
+  }
+  return programs
+}
+
+/** The folder its programs are installed in: the one above a `bin`, else the folder itself. */
+function installFolder(folder: string): string {
+  return /^s?bin$/i.test(path.basename(folder)) ? path.dirname(folder) : folder
 }
 
 /** Whether a path is a folder itself or inside it. */
@@ -106,23 +158,57 @@ export function inside(folder: string, file: string): boolean {
 /** Where in its folder a run's scratch folders are made, each its own: `<folder>/.celler/run-…`. */
 export const SCRATCH = ".celler"
 
-/** A run's own scratch folder, made inside its folder (SCRATCH): there is no other place it may keep anything. */
+/**
+ * A run's own scratch folder, made inside its folder (SCRATCH), and its short one, in /tmp on macOS and Linux, which
+ * only its owner may use: there is no other place it may keep anything.
+ */
 export function scratchFor(folder: string): Places["scratch"] {
   const parent = path.join(folder, SCRATCH)
   mkdirSync(parent, { recursive: true })
   const root = mkdtempSync(path.join(parent, "run-"))
-  const scratch = { root, tmp: path.join(root, "tmp"), home: path.join(root, "home"), cache: path.join(root, "cache") }
+  const tmp = path.join(root, "tmp")
+  const short = process.platform === "win32" ? tmp : mkdtempSync(path.join(realpathSync("/tmp"), "celler-"))
+  const scratch = { root, tmp, home: path.join(root, "home"), cache: path.join(root, "cache"), short }
   for (const dir of [scratch.tmp, scratch.home, scratch.cache]) mkdirSync(dir)
   return scratch
 }
 
-/** A run's scratch folder gone after it, and the folder holding the scratch folders, once none is left in it. */
-export function removeScratch(scratch: Places["scratch"]): void {
-  rmSync(scratch.root, { recursive: true, force: true })
+/**
+ * A run's scratch folders gone after it, and the folder holding the scratch folders, once none is left in it. Removed
+ * in the background, as a run's caches can be large; it never fails: what can't be removed (a file still open on
+ * Windows) stays.
+ */
+export async function removeScratch(scratch: Places["scratch"]): Promise<void> {
+  await removeFolder(scratch.root)
+  await removeFolder(scratch.short)
   try {
+    // At once, so it never falls between another run's scratchFor making this folder and its scratch in it.
     rmdirSync(path.dirname(scratch.root))
   } catch {
     // Another run's scratch is still there, or it is gone already.
+  }
+}
+
+/** A folder and all in it gone, or as much of it as can go; it never fails. */
+export async function removeFolder(dir: string): Promise<void> {
+  try {
+    await rm(dir, { recursive: true, force: true })
+  } catch {
+    try {
+      // A tool's read-only folders, such as Go's module cache: made writable, then removed.
+      await makeWritable(dir)
+      await rm(dir, { recursive: true, force: true })
+    } catch {
+      // It stays.
+    }
+  }
+}
+
+/** A folder and every folder in it writable by its owner; links are not followed. */
+async function makeWritable(dir: string): Promise<void> {
+  await chmod(dir, 0o700)
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) await makeWritable(path.join(dir, entry.name))
   }
 }
 
@@ -152,7 +238,7 @@ export function placesFor(o: { folder: string; scratch: Places["scratch"]; data?
     temps: systemTemps(),
     home,
     data: o.data ? path.resolve(o.data) : null,
-    toolchain: toolchainOf(o.pathVariable, home),
+    toolchain: toolchainOf(o.pathVariable, home, o.data ?? null),
     readable: (o.readable ?? []).map((p) => path.resolve(p)),
     secrets: secretsIn(o.folder),
     hidden: o.hidden,
