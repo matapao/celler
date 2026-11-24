@@ -151,6 +151,53 @@ test("a run's grants stop at a denied grouping cell, and a child gets nothing it
   assert.deepEqual(called, ['root']);
 });
 
+test("a host reads a run's grants as its calls are checked, live: a denied node is absent, a child has nothing its caller lacks, and none once its way is revoked or its cell denied", async (t) => {
+  // The person turned off a whole group and one tool; later, the root's way to its helper, then the child's own cell.
+  const off = new Set(['grp', 'secret']);
+  let rootId;
+  const read = {};
+  const app = createApp({
+    database: memoryDatabase(t),
+    adapters: new Map([['ok', { call: async () => text('ok') }]]),
+    platform: {
+      allowed: (_run, id) => !off.has(id),
+      launch: (spec, connect) =>
+        withClient(connect, async (client) => {
+          if (spec.entry === 'root') {
+            rootId = spec.id;
+            read.root = app.grants('alice', spec.id);
+            return client.callTool({ name: 'helper', arguments: {} });
+          }
+          read.child = app.grants('alice', spec.id);
+          off.add('helper');
+          read.revoked = [app.grants('alice', rootId), app.grants('alice', spec.id)];
+          off.delete('helper');
+          off.add('child');
+          read.denied = [app.grants('alice', rootId), app.grants('alice', spec.id)];
+          // Only its owner reads it, as any other read of a run.
+          assert.throws(() => app.grants('bob', spec.id), /Unknown run/);
+          return text('child done');
+        }),
+    },
+  });
+  const revision = app.publish([
+    cell('root', ['grp', 'shared', 'secret', 'helper']),
+    { kind: 'cell', id: 'grp', title: 'Group', exports: ['grouped'] },
+    tool('grouped', { adapter: 'ok' }),
+    tool('shared', { adapter: 'ok' }),
+    tool('secret', { adapter: 'ok' }),
+    tool('helper', { cell: 'child' }),
+    cell('child', ['grouped', 'shared']),
+  ]);
+  assert.deepEqual(await app.start(request(revision)), text('child done'));
+  assert.deepEqual(read, {
+    root: ['root', 'shared', 'helper'],
+    child: ['child', 'shared'],
+    revoked: [['root', 'shared'], []],
+    denied: [['root', 'shared', 'helper'], []],
+  });
+});
+
 test("a delegation's call key reused with other arguments while its child runs is refused, not a second child", async (t) => {
   const children = [];
   let release;

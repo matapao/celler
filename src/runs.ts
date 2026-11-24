@@ -3,7 +3,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { CallToolResultSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Platform, Start } from './app.js';
 import { compileGraph, type Binding, type Graph, type Schemas } from './catalog.js';
-import { fail } from './errors.js';
+import { CellerError, fail } from './errors.js';
 import { hash, normalizeJson } from './json.js';
 import type { appLimits } from './limits.js';
 import { freezeRun, raceAbort, type Run, type Store } from './store.js';
@@ -141,6 +141,20 @@ export function createRuns(
     }
   }
 
+  /**
+   * The node ids a run may reach now, as its calls and listings are checked: by its grants and the live policy, up its
+   * whole delegation chain. None once a caller up its chain has lost its way to it, or its own cell is denied.
+   */
+  function reachable(run: Run): string[] {
+    try {
+      checkAncestors(run);
+      return [...graph(run.revision).view(run.entry, access(run)).keys()];
+    } catch (error) {
+      if (error instanceof CellerError && (error.code === 'REVOKED' || error.code === 'DENIED')) return [];
+      throw error;
+    }
+  }
+
   function binding(run: Run, id: string, requireActive = false): Binding {
     checkAncestors(run, requireActive);
     const current = graph(run.revision);
@@ -269,6 +283,7 @@ export function createRuns(
     stop,
     waitFor,
     checkAncestors,
+    reachable,
     binding,
     startRun,
     delegate,

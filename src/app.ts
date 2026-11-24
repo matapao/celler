@@ -115,6 +115,12 @@ export function createApp(options: AppOptions) {
       for (const id of tree) store.finishRun(id, 'cancelled', { status: 'cancelled', by: 'host' });
       for (const id of tree) runs.stop(id);
     },
+    /** What a run may reach now: the node ids its grants, the live policy and its whole delegation chain allow. */
+    grants(owner: string, runId: string): string[] {
+      const { run } = runs.loadRunCached(runId);
+      if (run.owner !== owner) fail('NOT_FOUND', 'Unknown run');
+      return runs.reachable(run);
+    },
     notifyToolsChanged: server.notifyToolsChanged,
     history: store.history,
     human: {
