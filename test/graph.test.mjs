@@ -35,6 +35,38 @@ test('publication validates every edge including delegation targets', (t) => {
   assert.throws(() => app.publish([cell('a', [], { title: NaN })]), /valid JSON/);
 });
 
+test("a publish error about one node carries its id, so a host needn't read the message; one about the whole graph, none", (t) => {
+  const app = createApp({
+    database: memoryDatabase(t),
+    adapters: new Map([['ok', { call: async () => text('ok') }]]),
+    platform: {},
+  });
+  const unresolved = { inputSchema: { type: 'object', properties: { x: { $ref: '#/nowhere' } } } };
+  const group = { kind: 'cell', id: 'grp', title: 'Group', exports: [] };
+  const answers = { type: 'object', properties: { a: { type: 'string' } } };
+  const failing = [
+    ['t', [cell('a', ['t']), tool('t', { adapter: 'ok' }, unresolved)]],
+    ['t', [cell('a', ['t']), tool('t', { adapter: 'ok' }, { outputSchema: unresolved.inputSchema })]],
+    ['t', [tool('t', { adapter: 'absent' })]],
+    ['go', [cell('a', ['go']), tool('go', { cell: 'b' }, { outputSchema: answers }), cell('b', [])]],
+    ['grp', [cell('a', ['go']), tool('go', { cell: 'grp' }), group]],
+    ['t', [cell('a', ['go']), tool('go', { cell: 't' }), tool('t', { adapter: 'ok' })]],
+    ['missing', [cell('a', ['missing'])]],
+    ['a', [cell('a', ['t', 't']), tool('t', { adapter: 'ok' })]],
+    ['a', [cell('a', ['t'], { pins: ['t', 't'] }), tool('t', { adapter: 'ok' })]],
+    ['b', [cell('a', [], { pins: ['b'] }), cell('b', [])]],
+    ['discover', [cell('discover', [])]],
+    [undefined, [cell('a', ['b']), cell('b', ['a'])]],
+    [undefined, [cell('a', []), cell('a', [])]],
+  ];
+  for (const [node, graph] of failing)
+    assert.throws(
+      () => app.publish(graph),
+      { name: 'CellerError', code: 'INVALID_CONFIG', node },
+      JSON.stringify(graph),
+    );
+});
+
 test("adapters are the host's own map, read live: one added after createApp serves what is published after", async (t) => {
   const database = memoryDatabase(t);
   const adapters = new Map();

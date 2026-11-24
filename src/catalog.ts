@@ -130,9 +130,10 @@ export function createSchemas(limits: { schemaCacheSize: number; urlChars: numbe
       fail(
         'INVALID_CONFIG',
         `Invalid JSON Schema in ${nodeId}: ` + (error instanceof Error ? error.message : String(error)),
+        nodeId,
       );
     }
-    if ('$async' in check) fail('INVALID_CONFIG', 'Expected a synchronous JSON Schema');
+    if ('$async' in check) fail('INVALID_CONFIG', 'Expected a synchronous JSON Schema', nodeId);
     compiled.set(text, check);
     return check;
   }
@@ -158,22 +159,22 @@ export function compileGraph(config: unknown, schemas: Schemas, publishing?: { a
   const nodes = new Map(rows.map((node) => [node.id, node]));
   if (nodes.size !== rows.length) fail('INVALID_CONFIG', 'Duplicate node ID');
   for (const reserved of ['discover', 'invoke']) {
-    if (nodes.has(reserved)) fail('INVALID_CONFIG', 'Reserved node ID: ' + reserved);
+    if (nodes.has(reserved)) fail('INVALID_CONFIG', 'Reserved node ID: ' + reserved, reserved);
   }
 
   function get(nodeId: string) {
     const node = nodes.get(nodeId);
-    if (!node) fail('INVALID_CONFIG', 'Unknown node: ' + nodeId);
+    if (!node) fail('INVALID_CONFIG', 'Unknown node: ' + nodeId, nodeId);
     return node;
   }
   function cell(nodeId: string): Cell {
     const node = get(nodeId);
-    if (node.kind !== 'cell') fail('INVALID_CONFIG', 'Expected a cell: ' + nodeId);
+    if (node.kind !== 'cell') fail('INVALID_CONFIG', 'Expected a cell: ' + nodeId, nodeId);
     return node;
   }
   function runnableCell(nodeId: string): RunnableCell {
     const node = cell(nodeId);
-    if (!node.profile) fail('INVALID_CONFIG', 'Cell has no launch profile: ' + nodeId);
+    if (!node.profile) fail('INVALID_CONFIG', 'Cell has no launch profile: ' + nodeId, nodeId);
     return node as RunnableCell;
   }
 
@@ -188,8 +189,8 @@ export function compileGraph(config: unknown, schemas: Schemas, publishing?: { a
     let links: string[] = [];
     if (node.kind === 'cell') {
       links = node.exports;
-      if (new Set(links).size !== links.length) fail('INVALID_CONFIG', 'Duplicate export in ' + node.id);
-      if (new Set(node.pins).size !== node.pins.length) fail('INVALID_CONFIG', 'Duplicate pin in ' + node.id);
+      if (new Set(links).size !== links.length) fail('INVALID_CONFIG', 'Duplicate export in ' + node.id, node.id);
+      if (new Set(node.pins).size !== node.pins.length) fail('INVALID_CONFIG', 'Duplicate pin in ' + node.id, node.id);
       for (const link of links) {
         const parents = exporters.get(link);
         if (parents) parents.push(node.id);
@@ -212,10 +213,11 @@ export function compileGraph(config: unknown, schemas: Schemas, publishing?: { a
           fail(
             'INVALID_CONFIG',
             'A tool bound to a cell has no outputSchema, as a delegated run answers in text: ' + node.id,
+            node.id,
           );
         }
       } else if (publishing && !publishing.adapters.has(node.target.adapter)) {
-        fail('INVALID_CONFIG', 'Unknown adapter: ' + node.target.adapter);
+        fail('INVALID_CONFIG', 'Unknown adapter: ' + node.target.adapter, node.id);
       }
       const exposed = Object.freeze(exposedTool(node));
       const title = node.definition.title ?? node.definition.name ?? node.id;
@@ -312,7 +314,7 @@ export function compileGraph(config: unknown, schemas: Schemas, publishing?: { a
     if (node.kind !== 'cell' || !node.pins.length) continue;
     const reachable = staticReachable(node.id);
     for (const pin of node.pins) {
-      if (!reachable.has(pin) || get(pin).kind !== 'tool') fail('INVALID_CONFIG', 'Invalid pin: ' + pin);
+      if (!reachable.has(pin) || get(pin).kind !== 'tool') fail('INVALID_CONFIG', 'Invalid pin: ' + pin, pin);
     }
   }
 

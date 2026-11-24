@@ -21,14 +21,16 @@ export class CellerError extends Error {
   constructor(
     readonly code: ErrorCode,
     message: string,
+    /** The id of the one node of a graph it is about, where it is about one, such as a tool whose schema is invalid. */
+    readonly node?: string,
   ) {
     super(message);
     this.name = 'CellerError';
   }
 }
 
-export function fail(code: ErrorCode, message: string): never {
-  throw new CellerError(code, message);
+export function fail(code: ErrorCode, message: string, node?: string): never {
+  throw new CellerError(code, message, node);
 }
 
 /** Parses with a schema. A mismatch becomes an INVALID_ARGS error whose message says what to fix. */
