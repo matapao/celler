@@ -3,8 +3,10 @@ import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { createApp } from '@matapao/celler';
+import { createApp, NotSent } from '@matapao/celler';
+import { appLimits } from '../dist/limits.js';
 import { callThenClose, cell, memoryDatabase, request, text, tool, until, withClient } from './support.mjs';
+import { graph, packet, pending, use } from './support-approval.mjs';
 
 test("a policy that throws reaches the agent only in celler's words, while listing or calling, listed first or not", async (t) => {
   const database = memoryDatabase(t);
@@ -172,4 +174,73 @@ test("a call its run's end cuts off hears that the run ended, never what its ada
     await broken.start(request(broken.publish([cell('root', ['look']), tool('look', { adapter: 'ok' })]))),
     text('done'),
   );
+});
+
+test("a NotSent's reason, which its host writes for the agent apart from its error, reaches it after celler's words, on one line and within its limit; no error's own message does", async (t) => {
+  const secret = 'SMTP 550 5.1.1 <bob@10.0.0.5>: user unknown';
+  const cause = Error('connect ECONNREFUSED 10.0.0.5:25');
+  const within = 'a'.repeat(appLimits.reasonChars);
+  const cases = [
+    {
+      thrown: new NotSent(secret, { cause, reason: 'The mail service refused the address.' }),
+      heard: 'Delivery failed: The mail service refused the address.',
+    },
+    // Without one, or with nothing left of it: what the run heard before there were reasons.
+    { thrown: new NotSent(secret), heard: 'Delivery failed' },
+    { thrown: new NotSent(secret, { reason: ' \r\n\t\u0000 ' }), heard: 'Delivery failed' },
+    // Cut at its limit, and on one line: each run of control characters and line breaks is a space, and it is trimmed.
+    { thrown: new NotSent(secret, { reason: within + 'b'.repeat(100) }), heard: 'Delivery failed: ' + within },
+    {
+      thrown: new NotSent(secret, {
+        reason: '\n The mail service\r\nrefused\tthe address.\u2028\u0000Try\u007fanother\u001b[0m one.\u0085 ',
+      }),
+      heard: 'Delivery failed: The mail service refused the address. Try another [0m one.',
+    },
+  ].map((each) => ({ ...each, state: 'failed' }));
+  // Another error's `reason` is its own: whatever it holds, the run hears only celler's words.
+  cases.push({
+    thrown: Object.assign(Error(secret), { reason: 'It was sent to bob@10.0.0.5.' }),
+    heard: 'Delivery outcome unknown until the host reconciles it',
+    state: 'unknown',
+  });
+  let thrown;
+  const app = createApp({
+    database: memoryDatabase(t),
+    adapters: new Map([
+      [
+        'delivery',
+        {
+          prepare: async (_run, args) => packet(String(args.message)),
+          send: async () => {
+            throw thrown;
+          },
+        },
+      ],
+    ]),
+    platform: {
+      allowed: () => true,
+      launch: (_spec, connect) =>
+        withClient(connect, async (client) => {
+          const outcomes = [];
+          for (const [n, each] of cases.entries()) {
+            thrown = each.thrown;
+            const call = use(client, `k${n}`);
+            const id = await pending(app);
+            // The host hears its own error, whatever the run is told.
+            await assert.rejects(app.human.approve('alice', id), (error) => error === each.thrown);
+            outcomes.push({ heard: await call, state: app.human.review('alice', id).state });
+          }
+          assert.deepEqual(
+            outcomes,
+            cases.map(({ heard, state }) => ({
+              heard: { isError: true, content: [{ type: 'text', text: heard }] },
+              state,
+            })),
+          );
+          assert.doesNotMatch(JSON.stringify(outcomes), /SMTP|ECONNREFUSED|10\.0\.0\.5|bob/);
+          return text('done');
+        }),
+    },
+  });
+  assert.deepEqual(await app.start(request(app.publish(graph))), text('done'));
 });

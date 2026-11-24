@@ -3,11 +3,12 @@ import test from 'node:test';
 import { createHash } from 'node:crypto';
 import { createApp, NotSent } from '@matapao/celler';
 import { hash } from '../dist/json.js';
-import { cell, memoryDatabase, refused, request, text, tool, withClient } from './support.mjs';
+import { cell, memoryDatabase, refused, request, text, tool, until, withClient } from './support.mjs';
 import { graph, packet, pending, use } from './support-approval.mjs';
 
 // celler keeps only what it must: a sent packet exactly as approved; of what never went, its state, when it changed and
-// its hash; a delivery's answer until its run has collected it, then its hash; a run's output only as its hash.
+// its hash; a delivery's answer until its run has collected it, then its hash, and why one failed until then; a run's
+// output only as its hash.
 
 /** Everything the database holds, as text, to look for what it should no longer keep. */
 const everything = (database) =>
@@ -154,6 +155,70 @@ test("a delivery's answer is kept until its run has collected it, then only its 
   });
   assert.deepEqual(await app.start(request(app.publish(graph))), text('done'));
   assert.ok(!everything(database).includes('the answer'));
+});
+
+test('why a delivery failed, as its adapter told its run, is kept until the run has heard it, then not at all; a retry before that hears the same, as does its run once it has ended', async (t) => {
+  const database = memoryDatabase(t);
+  const reason = 'The mail service refused the address.';
+  const failed = (words) => ({ isError: true, content: [{ type: 'text', text: words }] });
+  let runId;
+  const app = createApp({
+    database,
+    adapters: new Map([
+      [
+        'delivery',
+        {
+          prepare: async (_run, args) => packet(String(args.message)),
+          send: async () => {
+            throw new NotSent('SMTP 550 5.1.1 user unknown', { reason });
+          },
+        },
+      ],
+    ]),
+    platform: {
+      allowed: () => true,
+      launch: (spec, connect) =>
+        withClient(connect, async (client) => {
+          runId = spec.id;
+          const call = (timeout) =>
+            client.callTool(
+              { name: 'send', arguments: { message: 'report' }, _meta: { 'celler/call-id': 'k' } },
+              undefined,
+              { timeout },
+            );
+          // Its agent's own limit ends the call while the person decides: why it failed, once it has, reaches no call.
+          const first = call(300);
+          const id = await pending(app);
+          await assert.rejects(first, /timed out/);
+          await until(() => app.history('alice', spec.id).some((event) => event.kind === 'cancelled'));
+          await assert.rejects(app.human.approve('alice', id), NotSent);
+          assert.equal(row(database, id).result, JSON.stringify(reason));
+          // A retry collects it, as the first would have; from then on it is kept no more.
+          assert.deepEqual(await call(5000), failed(`Delivery failed: ${reason}`));
+          assert.equal(row(database, id).result, null);
+          // The same call made again with its key hears only that it failed.
+          assert.deepEqual(await call(5000), failed('Delivery failed'));
+          // One left for the person as the run ends.
+          use(client, 'later', 'later').catch(() => {});
+          await pending(app);
+          return text('done');
+        }),
+    },
+  });
+  assert.deepEqual(await app.start(request(app.publish(graph))), text('done'));
+  const later = await pending(app);
+  await assert.rejects(app.human.approve('alice', later), NotSent);
+  // Its run, connected again once it has ended, collects why it failed, once.
+  await withClient(
+    (channel) => app.reconnect('alice', runId, channel),
+    async (client) => {
+      assert.deepEqual(await use(client, 'later', 'later'), failed(`Delivery failed: ${reason}`));
+      assert.equal(row(database, later).result, null);
+      assert.deepEqual(await use(client, 'later', 'later'), failed('Delivery failed'));
+    },
+  );
+  const stored = everything(database);
+  for (const trace of [reason, 'SMTP']) assert.ok(!stored.includes(trace), trace);
 });
 
 test("a run's `ended` event keeps its status and its output's hash, not the output, and a delegated run's answer still reaches its caller", async (t) => {

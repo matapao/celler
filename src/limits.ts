@@ -38,6 +38,8 @@ export const appLimits = {
   urlChars: 2048,
   /** How much of what is wrong with its arguments a call is told. */
   argsErrorChars: 500,
+  /** How much of why its delivery never left a call is told: the `reason` its adapter's `NotSent` gives. */
+  reasonChars: 500,
   /** The longest `celler/call-id` a client may give. */
   callIdChars: 128,
   /** Progress heartbeat while a call waits for a person or a delegated run. 0 sends none. */

@@ -23,22 +23,20 @@ export function createCalls(
 ) {
   const activeCalls = new Map<string, number>(); // run id → tool calls in flight
 
-  /** What a call came to, and the approval whose answer it read, if it read one. */
+  /** What a call came to. The approval it stages or joins, if it does, is put in `staged` before it waits on it. */
   async function execute(
     run: Run,
     node: Binding,
     args: Args,
     key: string,
     signal: AbortSignal,
-    o: { heartbeat?: () => void; asTask: boolean },
-  ): Promise<{ value: unknown; answer?: string }> {
+    o: { heartbeat?: () => void; asTask: boolean; staged: { approval?: string } },
+  ): Promise<unknown> {
     const { heartbeat, asTask } = o;
-    if ('cell' in node.target) {
-      return { value: await runs.delegate(run, node.id, node.target.cell, args, key, signal, o) };
-    }
+    if ('cell' in node.target) return runs.delegate(run, node.id, node.target.cell, args, key, signal, o);
     const adapter = registry.get(node.target.adapter);
     if (!adapter) fail('UNAVAILABLE', 'Adapter unavailable: ' + node.target.adapter);
-    if ('call' in adapter) return { value: await adapter.call(run, args, signal) };
+    if ('call' in adapter) return adapter.call(run, args, signal);
     const approval = await store.stage(
       run,
       key,
@@ -53,14 +51,12 @@ export function createCalls(
       },
       signal,
     );
+    o.staged.approval = approval;
     // The run waits for the person until they decide, or the call is withdrawn or cut off: that time isn't the run's.
     // Made as a task, the call waits, but its agent doesn't: it goes on with its work meanwhile.
     const release = asTask ? undefined : platform.waiting?.(run);
     try {
-      return {
-        value: await runs.waitFor(store.result(run.owner, approval, signal), signal, heartbeat),
-        answer: approval,
-      };
+      return await runs.waitFor(store.result(run.owner, approval, signal), signal, heartbeat);
     } finally {
       release?.();
     }
@@ -97,25 +93,27 @@ export function createCalls(
         // was delegated by waits on it any more: nothing is held for the person.
         const approval = store.existingApproval(run, key, id, args);
         if (!approval) fail('RUN_ENDED', 'Run has ended');
-        const value = await runs.waitFor(store.result(run.owner, approval, signal), signal, heartbeat);
-        // Heard, whether or not it passes its checks: its run has collected it.
-        store.collect(run.owner, approval);
-        return runs.checkedResult(current, id, value);
+        try {
+          const value = await runs.waitFor(store.result(run.owner, approval, signal), signal, heartbeat);
+          return runs.checkedResult(current, id, value);
+        } finally {
+          // Heard, whether or not it passes its checks, or why it failed: its run has collected it.
+          if (!signal.aborted) store.collect(run.owner, approval);
+        }
       }
 
       store.record(run.id, 'call', { id, key });
-      // A delivery's answer is kept until a call of its run has heard it, as it returned or failed its checks; not
-      // while it was only withdrawn or cut off, so a retry still collects it.
-      let answer: string | undefined;
+      // What a delivery came to is kept until a call of its run has heard it: its answer, as it returned or failed its
+      // checks, or why it failed; not while it was only withdrawn or cut off, so a retry still collects it.
+      const staged: { approval?: string } = {};
       try {
-        const done = await execute(run, node, args, key, signal, { heartbeat, asTask });
-        answer = done.answer;
-        const result = runs.checkedResult(current, id, done.value);
-        store.heard(run, 'returned', { id, key, error: result.isError ?? false }, answer);
+        const value = await execute(run, node, args, key, signal, { heartbeat, asTask, staged });
+        const result = runs.checkedResult(current, id, value);
+        store.heard(run, 'returned', { id, key, error: result.isError ?? false }, staged.approval);
         return result;
       } catch (error) {
         if (signal.aborted) store.record(run.id, 'cancelled', { id, key, code: codeOf(error) });
-        else store.heard(run, 'failed', { id, key, code: codeOf(error) }, answer);
+        else store.heard(run, 'failed', { id, key, code: codeOf(error) }, staged.approval);
         throw error;
       }
     } finally {

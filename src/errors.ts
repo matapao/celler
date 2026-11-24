@@ -31,13 +31,30 @@ export class CellerError extends Error {
 
 /**
  * What an adapter's `send` throws when its request never reached the service: refused before it went out, or no
- * connection made. Its delivery is then recorded as failed, never as sent or unknown.
+ * connection made. Its delivery is then recorded as failed, never as sent or unknown. Its message, as any host error's,
+ * never reaches the agent: its run hears "Delivery failed", followed by its `reason` if it gives one.
  */
 export class NotSent extends Error {
-  constructor(message = 'The request never reached the service', options?: ErrorOptions) {
+  /** Why it never left, in words its host writes for the agent, apart from its message: what its run is told. */
+  readonly reason?: string;
+
+  constructor(message = 'The request never reached the service', options?: ErrorOptions & { reason?: string }) {
     super(message, options);
     this.name = 'NotSent';
+    this.reason = options?.reason;
   }
+}
+
+// Control characters, line breaks among them, and Unicode's line and paragraph separators.
+const BREAKS = /[\p{Cc}\p{Zl}\p{Zp}]+/gu;
+
+/**
+ * A NotSent's reason as its run hears it: on one line, each run of control characters and line breaks a space, trimmed
+ * and cut to `maxChars`. None if it gives no text, or nothing is left of it.
+ */
+export function reasonOf(error: NotSent, maxChars: number): string | undefined {
+  if (typeof error.reason !== 'string') return undefined;
+  return error.reason.replace(BREAKS, ' ').trim().slice(0, maxChars).trimEnd() || undefined;
 }
 
 export function fail(code: ErrorCode, message: string, node?: string): never {

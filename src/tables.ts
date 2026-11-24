@@ -6,7 +6,8 @@ import type { ApprovalState, EventKind, Run, RunStatus } from './store.js';
 
 // celler's tables in SQLite, what it keeps in them, and its records as a host reads them. It keeps only what it must, to
 // do its job and to answer for what left: a packet that was sent stays exactly as it was approved, and of what never
-// went, of a delivery's answer once its run has collected it and of a run's output, only a hash: `{"sha256":"…"}`.
+// went, of a delivery's answer once its run has collected it and of a run's output, only a hash: `{"sha256":"…"}`. Why
+// a delivery failed, as its adapter told its run, is kept only until its run has collected it.
 
 /** A packet as its adapter prepares it, the person approves it and its `send` delivers it. */
 export const packet = z.strictObject({
@@ -20,7 +21,10 @@ export type Write = z.output<typeof packet>;
 /** What celler keeps of a value it doesn't keep: the hash of its canonical JSON. */
 export const hashOnly = z.strictObject({ sha256: z.string() });
 
-/** The states of an approval that never went: it keeps its state, when it changed, and its content's hash alone. */
+/**
+ * The states of an approval that never went: it keeps its state, when it changed, and its content's hash alone; a failed
+ * one, as its result, the `reason` its `NotSent` gave its run too, until a call of the run has heard it.
+ */
 const unsentStates = ['declined', 'failed'] as const satisfies readonly ApprovalState[];
 type UnsentState = (typeof unsentStates)[number];
 

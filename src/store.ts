@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { fail, NotSent } from './errors.js';
+import { fail, NotSent, reasonOf } from './errors.js';
 import { canonicalJson, hash, normalizeJson } from './json.js';
+import type { appLimits } from './limits.js';
 import {
   approvalId,
   cleared,
@@ -55,7 +56,6 @@ const lifecycle: Record<ApprovalState, readonly ApprovalState[]> = {
 
 type Delivery = (write: Write, key: string, signal?: AbortSignal) => Promise<CallToolResult>;
 type ResolvedDelivery = { verify?: (write: Write) => void | Promise<void>; send: Delivery };
-type StoreLimits = { inlineLimit: number; maxPendingApprovals: number; maxPendingBytes: number; busyTimeoutMs: number };
 
 export function freezeRun(run: Run): Run {
   return Object.freeze(run.parent ? { ...run, parent: Object.freeze({ ...run.parent }) } : { ...run });
@@ -80,7 +80,7 @@ export function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<
   });
 }
 
-export function openStore(db: DatabaseSync, limits: StoreLimits) {
+export function openStore(db: DatabaseSync, limits: typeof appLimits) {
   openTables(db, limits.busyTimeoutMs);
   // A `started` delivery was cut off by a crash and may have arrived. Safe only because one service owns the database.
   db.prepare("UPDATE approvals SET state='unknown',changed_at=? WHERE state='started'").run(Date.now());
@@ -128,6 +128,7 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
     "SELECT result FROM approvals WHERE owner=? AND id=? AND state='sent' AND collected_at IS NULL",
   );
   const updateCollected = db.prepare('UPDATE approvals SET result=?,collected_at=? WHERE owner=? AND id=?');
+  const clearReason = db.prepare("UPDATE approvals SET result=NULL WHERE owner=? AND id=? AND state='failed'");
 
   // In-process wake-ups for calls waiting on an approval.
   const waiters = new Map<string, Set<() => void>>();
@@ -202,12 +203,13 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
       fail('INVALID_STATE', 'Approval is not ' + from);
     notify(id);
   }
-  /** A delivery's answer its run has collected: only its hash is kept from now on, with when it was collected. */
+  /** What a delivery came to, once its run has collected it: its answer's hash, with when; of why it failed, nothing. */
   function clearAnswer(owner: string, id: string) {
     const row = selectAnswer.get(owner, id);
     if (row) updateCollected.run(row.result === null ? null : cleared(String(row.result)), Date.now(), owner, id);
+    clearReason.run(owner, id);
   }
-  /** What a call of the run heard, with its event. The answer of the approval it read, if it read one, is collected. */
+  /** What a call of the run heard, with its event. What the approval it read came to, if it read one, is collected. */
   function heard(run: Run, kind: 'returned' | 'failed', detail: unknown, answer?: string) {
     atomically(() => {
       record(run.id, kind, detail);
@@ -347,7 +349,11 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
       }
       if (row.state === 'declined') fail('DECLINED', 'The person declined this action');
       if (row.state === 'unknown') fail('DELIVERY_FAILED', 'Delivery outcome unknown until the host reconciles it');
-      if (row.state === 'failed') fail('DELIVERY_FAILED', 'Delivery failed');
+      // A failed one's result is the reason its adapter gave its run, if it gave one, until a call of the run heard it.
+      if (row.state === 'failed') {
+        const reason = row.result === null ? '' : ': ' + (JSON.parse(String(row.result)) as string);
+        fail('DELIVERY_FAILED', 'Delivery failed' + reason);
+      }
 
       await new Promise<void>((resolve, reject) => {
         let set = waiters.get(id);
@@ -395,8 +401,9 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
     } catch (error) {
       // One its adapter says never left has failed; any other may have arrived, and waits for the host's word.
       const never = error instanceof NotSent;
+      const reason = never ? reasonOf(error, limits.reasonChars) : undefined;
       atomically(() => {
-        transition(owner, id, 'started', never ? 'failed' : 'unknown');
+        transition(owner, id, 'started', never ? 'failed' : 'unknown', reason && JSON.stringify(reason));
         record(item.run.id, 'delivery_failed', { id, tool: item.tool, ...(never ? { outcome: 'failed' } : {}) });
       });
       throw error;
@@ -478,7 +485,7 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
     loadRun,
     record,
     heard,
-    /** A delivery's answer collected by a call that records no event: one of a run that has ended. */
+    /** What a delivery came to, collected by a call that records no event: one of a run that has ended. */
     collect: (owner: string, id: string) => atomically(() => clearAnswer(owner, id)),
     callKey,
     existingApproval,

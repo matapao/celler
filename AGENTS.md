@@ -20,9 +20,9 @@ For the people and coding agents who change this code. People who use the librar
 3. A published revision never changes.
 4. Every call is checked against the run's grants, the live policy and the whole delegation chain.
 5. A delivery is recorded as sent before anything checks its response.
-6. The harness sees only this library's own error messages, never raw host, adapter or database errors.
+6. The harness sees only this library's own error messages, never raw host, adapter or database errors. The one exception is a reason a host writes for the agent, given on purpose apart from its error (`NotSent`'s `reason`): it passes as written, on one line and within its limit (`reasonChars`).
 7. An agent's commands reach no network, write only in the run's folder and never its own settings for the agents celler runs (their scratch and temporary files are the run's own: in `.celler/` inside it, and Claude Code's shell's in a short folder of the run's), and read nothing of the person's home, the host's data, the environment or the system's temporary folders, each closed as a whole: what isn't the run's folder or the system's own needs no list. Only each agent's own sandbox settings say so, one file per agent per system (`src/harness/sandbox/`), each asserted against the same rule. On Linux Claude Code's sandbox takes no pattern for what its commands may not write, so they are kept from those settings at the folder's top only, by name (`claude.linux.ts`).
-8. celler keeps only what it must: a sent packet exactly as approved; of what never went (declined or failed), its state, when it changed and the hash of its arguments and packet; a delivery's answer until a call of its run has heard it, then its hash; a run's output only as its hash, in its `ended` event. `src/tables.ts` says what each record keeps, and brings an older celler's database there once, as it opens.
+8. celler keeps only what it must: a sent packet exactly as approved; of what never went (declined or failed), its state, when it changed and the hash of its arguments and packet; a delivery's answer until a call of its run has heard it, then its hash, and a failed one's `reason` until then, then nothing; a run's output only as its hash, in its `ended` event. `src/tables.ts` says what each record keeps, and brings an older celler's database there once, as it opens.
 
 ## Style
 
