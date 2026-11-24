@@ -139,11 +139,12 @@ export interface Runtime {
   /** `deep` also test-runs a tiny prompt, as a model-only run (purpose `inference`): no tools, nothing of the person's. */
   health(deep: boolean): Promise<RuntimeHealth>;
   /**
-   * Removes the transcript its agent keeps of a session that ran in `cwd`, with every prompt and tool result, which a
-   * resume needs: once the session's work is done. Only that session's own files go, never through a link; it gives the
-   * paths it removed, none when there was nothing. A runtime whose agent keeps none has none.
+   * Removes all its agent keeps of a session that ran in `cwd`, once the session's work is done: its transcript, with
+   * every prompt and tool result, which a resume needs, and everything else its agent keeps by the session's id, by the
+   * agent's own deletion where it has one. Only that session's own goes, never through a link; it gives the paths of the
+   * files and folders it removed, none when there was nothing. A runtime whose agent keeps none has none.
    */
-  removeTranscript?(session: Pick<RunSpec, 'cwd' | 'sessionId'>): Promise<string[]>;
+  removeSession?(session: Pick<RunSpec, 'cwd' | 'sessionId'>): Promise<string[]>;
 }
 
 export interface RuntimeHealth {

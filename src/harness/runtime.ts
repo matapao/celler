@@ -1,5 +1,6 @@
 // One runtime for either coding agent (agents.ts): whether it can run, its own sign-in, its runs, each through the
-// agent's own SDK (claude.ts, codex.ts), and their sessions' transcripts, once their work is done (transcripts.ts).
+// agent's own SDK (claude.ts, codex.ts), and all it keeps of their sessions, removed once their work is done
+// (sessions.ts).
 // What a run is given (Turn) is the same for both: its places, its environment, and its clock, which stands still while
 // the person is asked (clock.ts). What Claude Code's commands leave running ends with its run (processes.ts); Codex's
 // SDK starts Codex itself, and its commands' are Codex's to end.
@@ -16,8 +17,8 @@ import { RunClock } from './clock.js';
 import { RunProcesses, startLogin } from './processes.js';
 import { agentEnv, runForOutput } from './programs.js';
 import { inside, removeFolder, removeScratch, type Places } from './sandbox/places.js';
+import { removeSession } from './sessions.js';
 import { setUp } from './setup.js';
-import { removeTranscript } from './transcripts.js';
 import {
   errorText,
   failedRun,
@@ -171,9 +172,9 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  /** A session's transcript removed, in the environment the agent's runs have (transcripts.ts). */
-  removeTranscript(session: Pick<RunSpec, 'cwd' | 'sessionId'>): Promise<string[]> {
-    return removeTranscript(this.agent, session, agentEnv(this.agent.env(this.host), this.host));
+  /** All the agent keeps of a session removed, in the environment the agent's runs have (sessions.ts). */
+  removeSession(session: Pick<RunSpec, 'cwd' | 'sessionId'>): Promise<string[]> {
+    return removeSession(this.agent, session, agentEnv(this.agent.env(this.host), this.host));
   }
 
   run(spec: RunSpec, onProgress: (p: RunProgress) => void): RunHandle {

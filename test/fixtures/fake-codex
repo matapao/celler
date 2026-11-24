@@ -4,8 +4,11 @@
 // a file it wrote, its reply and its usage. With FAKE_CODEX_TOOL, it first calls that tool on the MCP server in its
 // settings, each header's value from the variable the header names, and its reply ends with the tool's answer. With
 // FAKE_CODEX_EXIT_AT_ONCE, it ends before it reads its prompt, as Codex does with a setting it refuses. With
-// FAKE_CODEX_IGNORE_STOP, it never ends its turn and takes no notice of SIGTERM, and writes its pid there.
-import { appendFileSync } from 'node:fs';
+// FAKE_CODEX_IGNORE_STOP, it never ends its turn and takes no notice of SIGTERM, and writes its pid there. Its
+// `delete --force <id>` deletes a thread as Codex's own deletion does, as far as a test sees it: its rollouts and its
+// line in session_index.jsonl in CODEX_HOME, never through a link. It refuses a thread it doesn't have, as Codex does,
+// and any with FAKE_CODEX_DELETE_REFUSED.
+import { appendFileSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -18,6 +21,49 @@ if (args[0] === '--version') {
 if (args[0] === 'login') {
   console.log(process.env.FAKE_CODEX_SIGNED_OUT ? 'Not logged in' : 'Logged in using ChatGPT');
   process.exit(process.env.FAKE_CODEX_SIGNED_OUT ? 1 : 0);
+}
+
+if (args[0] === 'delete') {
+  const [, force, id] = args;
+  const home = process.env.CODEX_HOME;
+  if (process.env.FAKE_CODEX_LOG)
+    appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ what: 'delete', data: { args, home } }) + '\n');
+  const refuse = () => {
+    console.error('Error: failed to delete session');
+    process.exit(1);
+  };
+  if (force !== '--force' || process.env.FAKE_CODEX_DELETE_REFUSED) refuse();
+  /** The thread's rollouts, compressed or not, in a folder and the folders in it, which are folders, never links. */
+  const rollouts = (folder) =>
+    readdirSync(folder, { withFileTypes: true }).flatMap((entry) => {
+      const file = path.join(folder, entry.name);
+      if (entry.isDirectory()) return rollouts(file);
+      const its = entry.name.endsWith(`-${id}.jsonl`) || entry.name.endsWith(`-${id}.jsonl.zst`);
+      return entry.isFile() && its ? [file] : [];
+    });
+  let found = false;
+  for (const folder of ['sessions', 'archived_sessions'].map((name) => path.join(home, name))) {
+    let files = [];
+    try {
+      files = rollouts(folder);
+    } catch {
+      /* no such folder */
+    }
+    for (const file of files) unlinkSync(file);
+    found ||= files.length > 0;
+  }
+  const index = path.join(home, 'session_index.jsonl');
+  try {
+    const lines = readFileSync(index, 'utf8').split('\n').filter(Boolean);
+    const kept = lines.filter((line) => JSON.parse(line).id !== id);
+    if (kept.length < lines.length) writeFileSync(index, kept.map((line) => line + '\n').join(''));
+    found ||= kept.length < lines.length;
+  } catch {
+    /* no index */
+  }
+  if (!found) refuse();
+  console.log(`Deleted session ${id}.`);
+  process.exit(0);
 }
 
 const all = (name) => args.flatMap((a, i) => (a === name ? [args[i + 1]] : []));

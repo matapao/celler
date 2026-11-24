@@ -77,6 +77,8 @@ export const harnessLimits = {
   exitGraceMs: 3000,
   /** A sign-in left open this long is stopped. */
   loginMs: 15 * 60_000,
+  /** An agent's own deletion of a session, which reads all its sessions' records first. */
+  sessionDeleteMs: 120_000,
   /** The end of an agent's error output that is kept, and how much of it a run's error carries. */
   stderrChars: 4000,
   errorChars: 800,

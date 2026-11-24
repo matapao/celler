@@ -1,8 +1,9 @@
 // The two coding agents, Claude Code and Codex, as data: what each needs found, how it says its version and whether it
-// is signed in, how it signs in, how a run of it goes, through its own SDK (claude.ts, codex.ts), and where it keeps
-// each session's transcript (transcripts.ts). One runtime runs either (runtime.ts). Each works with its own tools in
-// the run's folder, its commands in its own sandbox at its strictest, as the settings files for each system say
-// (sandbox/claude.*.ts, sandbox/codex.*.ts); everything outside the folder goes through the run's MCP tools.
+// is signed in, how it signs in, how a run of it goes, through its own SDK (claude.ts, codex.ts), and what it keeps of
+// each session, where, and how it deletes one itself (sessions.ts). One runtime runs either (runtime.ts). Each works
+// with its own tools in the run's folder, its commands in its own sandbox at its strictest, as the settings files for
+// each system say (sandbox/claude.*.ts, sandbox/codex.*.ts); everything outside the folder goes through the run's MCP
+// tools.
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -40,20 +41,42 @@ export interface Agent {
   nativeDiscovery: boolean;
   /** One run, through its own SDK. */
   run(turn: Turn): Promise<RunResult>;
-  /** Where it keeps each session's transcript (transcripts.ts). */
-  transcripts: Transcripts;
+  /** What it keeps of each session, and how it deletes one itself (sessions.ts). */
+  sessions: Sessions;
 }
 
 /**
- * Where an agent keeps each session's transcript, the record of its run with every prompt and tool result, which it
- * resumes the session from: in folders of its own home (`homeVariable`'s, else `home` in the person's), found by the
- * session's working folder, by its real path; and in each, and in the folders `depth` down in it, the names that are
- * that session's own, by its id exactly. Nothing else there is one session's.
+ * What an agent keeps of each session, its transcript with every prompt and tool result among it, which it resumes the
+ * session from: in folders of its own home (`homeVariable`'s, else `home` in the person's), some found by the session's
+ * working folder, by its real path. Nothing else there is one session's. Where it deletes a session itself (`deletes`,
+ * its program's arguments), its deletion removes the session's own in the folders marked `deleted`, and its lines and
+ * rows in the files and databases its sessions share; it refuses a session it doesn't have.
  */
-interface Transcripts {
+interface Sessions {
   home: string;
-  folders(cwd: string): { path: string[]; depth: number }[];
+  folders(cwd: string): SessionFolder[];
+  deletes?(sessionId: string): string[];
+}
+
+/**
+ * One of an agent's folders, by its path in its home: in it, and in the folders `depth` down in it, the names that are
+ * a session's own, by its id exactly.
+ */
+export interface SessionFolder {
+  path: string[];
+  depth: number;
   named(name: string, sessionId: string): boolean;
+  deleted?: boolean;
+}
+
+/** A name that is a session's own: its id, or its id and then a dot (`<id>.jsonl`, `<id>.txt`, `<id>.<n>.sh`). */
+function byId(name: string, sessionId: string): boolean {
+  return name === sessionId || name.startsWith(`${sessionId}.`);
+}
+
+/** One of an agent's folders, by its path in its home, where a session's own are named by its id (`byId`). */
+function folderById(...names: string[]): SessionFolder {
+  return { path: names, depth: 0, named: byId };
 }
 
 /** The models a tier runs on, as each agent names them. */
@@ -101,13 +124,40 @@ function projectName(cwd: string): string {
 }
 
 /**
- * Claude Code's: a session's `<id>.jsonl` in its working folder's sessions' folder, and beside it what is that
- * session's too: its folder `<id>` (its helpers' transcripts, its large tool results) and `<id>.…` (one set aside).
+ * Claude Code's, wherever its own code names them by a session's id in its config folder. It deletes none of one
+ * session's itself: its SDK's deleteSession removes its transcript and its folder only, and `claude purge` all of a
+ * working folder's sessions. Its prompt history, `history.jsonl`, is its own terminal's: a session through its SDK
+ * writes none there.
  */
-const CLAUDE_TRANSCRIPTS: Transcripts = {
+const CLAUDE_SESSIONS: Sessions = {
   home: '.claude',
-  folders: (cwd) => [{ path: ['projects', projectName(cwd)], depth: 0 }],
-  named: (name, sessionId) => name === sessionId || name.startsWith(`${sessionId}.`),
+  folders: (cwd) => [
+    // Its transcript, `<id>.jsonl`, in its working folder's sessions' folder, and beside it what is that session's too:
+    // its folder `<id>` (its helpers' transcripts, its large tool results) and `<id>.…` (one set aside, its records of
+    // a compaction or a cloud session).
+    folderById('projects', projectName(cwd)),
+    // The files it changed, as they were before, to rewind them (`<id>/`).
+    folderById('file-history'),
+    // What its hooks set for its commands' shell (`<id>/`).
+    folderById('session-env'),
+    // Its task list (`<id>/`).
+    folderById('tasks'),
+    // The files and the pictures it was given (`<id>/`).
+    folderById('uploads'),
+    folderById('image-cache'),
+    // Its debug log (`<id>.txt`).
+    folderById('debug'),
+    // What /insights made of it (`<id>.json`).
+    folderById('usage-data', 'session-meta'),
+    folderById('usage-data', 'facets'),
+    // Where they are asked for, its start's timings (`<id>.txt`, `<id>.json`) and its requests as sent (`<id>.jsonl`).
+    folderById('startup-perf'),
+    folderById('dump-prompts'),
+    // Its usage events not yet sent (`1p_failed_events.<id>.<batch>.json`).
+    { path: ['telemetry'], depth: 0, named: (name, sessionId) => name.startsWith(`1p_failed_events.${sessionId}.`) },
+    // Its to-do lists, as versions before its task lists kept them (`<id>-agent-<agent>.json`).
+    { path: ['todos'], depth: 0, named: (name, sessionId) => name.startsWith(`${sessionId}-agent-`) },
+  ],
 };
 
 /** Claude Code, the person's own, through the Claude Agent SDK. */
@@ -129,7 +179,7 @@ export function claudeAgent(o: { claude?: () => string | null; words: ClaudeWord
     // Its ToolSearch.
     nativeDiscovery: true,
     run: (turn) => runClaude(turn, { models: MODELS.claude, signedOut: o.words.login }),
-    transcripts: CLAUDE_TRANSCRIPTS,
+    sessions: CLAUDE_SESSIONS,
   };
 }
 
@@ -162,17 +212,28 @@ const CODEX_OWN_SIGN_IN = { OPENAI_API_KEY: '', CODEX_API_KEY: '', CODEX_ACCESS_
 /** A rollout's name: when its thread started, then the thread's id; `.zst` after it once Codex has compressed it. */
 const ROLLOUT = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([^.]+)\.jsonl(?:\.zst)?$/;
 
+/** A thread's rollout, by its name. */
+const isRollout = (name: string, sessionId: string) => ROLLOUT.exec(name)?.[1] === sessionId;
+
 /**
- * Codex's, its rollouts, whatever folder a thread worked in: `sessions/<year>/<month>/<day>/rollout-…-<id>.jsonl`, by
- * the day it started, and those it archived, in `archived_sessions`.
+ * Codex's, for a thread. Its own deletion (`codex delete --force <id>`) removes its rollouts, its rows in Codex's
+ * databases (its messages among them), its name in `session_index.jsonl`, and the threads it started; not its shell's
+ * snapshots or the pictures it made. Its prompt history, `history.jsonl`, is its own terminal's: a thread through its
+ * SDK writes none there.
  */
-const CODEX_TRANSCRIPTS: Transcripts = {
+const CODEX_SESSIONS: Sessions = {
   home: '.codex',
   folders: () => [
-    { path: ['sessions'], depth: 3 },
-    { path: ['archived_sessions'], depth: 3 },
+    // Its rollouts, whatever folder it worked in: `sessions/<year>/<month>/<day>/rollout-…-<id>.jsonl`, by the day it
+    // started, and once it is archived, in `archived_sessions`.
+    { path: ['sessions'], depth: 3, named: isRollout, deleted: true },
+    { path: ['archived_sessions'], depth: 3, named: isRollout, deleted: true },
+    // Its shell's snapshots (`<id>.<n>.sh`, `<id>.tmp-<n>`), which its end removes, unless it ends otherwise.
+    folderById('shell_snapshots'),
+    // The pictures it made (`<id>/`).
+    folderById('generated_images'),
   ],
-  named: (name, sessionId) => ROLLOUT.exec(name)?.[1] === sessionId,
+  deletes: (sessionId) => ['delete', '--force', sessionId],
 };
 
 /**
@@ -201,6 +262,6 @@ export function codexAgent(o: { codex?: () => string | null; home: string; words
     // Its tool_search, over MCP tools it always defers.
     nativeDiscovery: true,
     run: (turn) => runCodex(turn, { models: MODELS.codex, signedOut: o.words.login }),
-    transcripts: CODEX_TRANSCRIPTS,
+    sessions: CODEX_SESSIONS,
   };
 }
