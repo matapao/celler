@@ -1,8 +1,8 @@
 // The two coding agents, Claude Code and Codex, as data: what each needs found, how it says its version and whether it
-// is signed in, how it signs in, and how a run of it goes, through its own SDK (claude.ts, codex.ts). One runtime runs
-// either (runtime.ts). Each works with its own tools in the run's folder, its commands in its own sandbox at its
-// strictest, as the settings files for each system say (sandbox/claude.*.ts, sandbox/codex.*.ts); everything outside
-// the folder goes through the run's MCP tools.
+// is signed in, how it signs in, how a run of it goes, through its own SDK (claude.ts, codex.ts), and where it keeps
+// each session's transcript (transcripts.ts). One runtime runs either (runtime.ts). Each works with its own tools in
+// the run's folder, its commands in its own sandbox at its strictest, as the settings files for each system say
+// (sandbox/claude.*.ts, sandbox/codex.*.ts); everything outside the folder goes through the run's MCP tools.
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -40,6 +40,20 @@ export interface Agent {
   nativeDiscovery: boolean;
   /** One run, through its own SDK. */
   run(turn: Turn): Promise<RunResult>;
+  /** Where it keeps each session's transcript (transcripts.ts). */
+  transcripts: Transcripts;
+}
+
+/**
+ * Where an agent keeps each session's transcript, the record of its run with every prompt and tool result, which it
+ * resumes the session from: in folders of its own home (`homeVariable`'s, else `home` in the person's), found by the
+ * session's working folder, by its real path; and in each, and in the folders `depth` down in it, the names that are
+ * that session's own, by its id exactly. Nothing else there is one session's.
+ */
+interface Transcripts {
+  home: string;
+  folders(cwd: string): { path: string[]; depth: number }[];
+  named(name: string, sessionId: string): boolean;
 }
 
 /** The models a tier runs on, as each agent names them. */
@@ -64,6 +78,38 @@ const OWN_SIGN_IN = {
   CLAUDE_CODE_USE_FOUNDRY: '',
 };
 
+/** How much of a working folder's path Claude Code's name for its sessions' folder holds as it is, at most. */
+const PROJECT_NAME_CHARS = 200;
+
+/** A string's hash as Claude Code makes it, Java's: a 32-bit integer. */
+function stringHash(s: string): number {
+  let hash = 0;
+  for (let i = 0; i < s.length; i++) hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0;
+  return hash;
+}
+
+/**
+ * Claude Code's name for a working folder's sessions' folder in its home's `projects`: the folder's real path (in NFC
+ * on macOS) with every character but an ASCII letter or digit a "-"; a longer one than PROJECT_NAME_CHARS cut there,
+ * then a "-" and the whole path's hash.
+ */
+function projectName(cwd: string): string {
+  const real = process.platform === 'darwin' ? cwd.normalize('NFC') : cwd;
+  const name = real.replace(/[^a-zA-Z0-9]/g, '-');
+  if (name.length <= PROJECT_NAME_CHARS) return name;
+  return `${name.slice(0, PROJECT_NAME_CHARS)}-${Math.abs(stringHash(real)).toString(36)}`;
+}
+
+/**
+ * Claude Code's: a session's `<id>.jsonl` in its working folder's sessions' folder, and beside it what is that
+ * session's too: its folder `<id>` (its helpers' transcripts, its large tool results) and `<id>.…` (one set aside).
+ */
+const CLAUDE_TRANSCRIPTS: Transcripts = {
+  home: '.claude',
+  folders: (cwd) => [{ path: ['projects', projectName(cwd)], depth: 0 }],
+  named: (name, sessionId) => name === sessionId || name.startsWith(`${sessionId}.`),
+};
+
 /** Claude Code, the person's own, through the Claude Agent SDK. */
 export function claudeAgent(o: { claude?: () => string | null; words: ClaudeWords }): Agent {
   const program = () => (o.claude ? o.claude() : findProgram('claude'));
@@ -83,6 +129,7 @@ export function claudeAgent(o: { claude?: () => string | null; words: ClaudeWord
     // Its ToolSearch.
     nativeDiscovery: true,
     run: (turn) => runClaude(turn, { models: MODELS.claude, signedOut: o.words.login }),
+    transcripts: CLAUDE_TRANSCRIPTS,
   };
 }
 
@@ -112,6 +159,22 @@ export const CODEX_HOME_CONFIG = 'cli_auth_credentials_store = "file"\n';
 /** Its own sign-in only, in its home: a key or token from the shell would win over it, and an endpoint from the shell would get it. */
 const CODEX_OWN_SIGN_IN = { OPENAI_API_KEY: '', CODEX_API_KEY: '', CODEX_ACCESS_TOKEN: '', OPENAI_BASE_URL: '' };
 
+/** A rollout's name: when its thread started, then the thread's id; `.zst` after it once Codex has compressed it. */
+const ROLLOUT = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([^.]+)\.jsonl(?:\.zst)?$/;
+
+/**
+ * Codex's, its rollouts, whatever folder a thread worked in: `sessions/<year>/<month>/<day>/rollout-…-<id>.jsonl`, by
+ * the day it started, and those it archived, in `archived_sessions`.
+ */
+const CODEX_TRANSCRIPTS: Transcripts = {
+  home: '.codex',
+  folders: () => [
+    { path: ['sessions'], depth: 3 },
+    { path: ['archived_sessions'], depth: 3 },
+  ],
+  named: (name, sessionId) => ROLLOUT.exec(name)?.[1] === sessionId,
+};
+
 /**
  * Codex, the person's own CLI, through the Codex SDK, in the host's Codex home (`home`): its sign-in and its sessions
  * are kept there, and as no folder is trusted there, Codex loads no folder's own settings.
@@ -138,5 +201,6 @@ export function codexAgent(o: { codex?: () => string | null; home: string; words
     // Its tool_search, over MCP tools it always defers.
     nativeDiscovery: true,
     run: (turn) => runCodex(turn, { models: MODELS.codex, signedOut: o.words.login }),
+    transcripts: CODEX_TRANSCRIPTS,
   };
 }

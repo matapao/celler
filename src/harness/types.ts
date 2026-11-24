@@ -136,6 +136,12 @@ export interface Runtime {
   run(spec: RunSpec, onProgress: (p: RunProgress) => void): RunHandle;
   /** `deep` also test-runs a tiny prompt, as a model-only run (purpose `inference`): no tools, nothing of the person's. */
   health(deep: boolean): Promise<RuntimeHealth>;
+  /**
+   * Removes the transcript its agent keeps of a session that ran in `cwd`, with every prompt and tool result, which a
+   * resume needs: once the session's work is done. Only that session's own files go, never through a link; it gives the
+   * paths it removed, none when there was nothing. A runtime whose agent keeps none has none.
+   */
+  removeTranscript?(session: Pick<RunSpec, 'cwd' | 'sessionId'>): Promise<string[]>;
 }
 
 export interface RuntimeHealth {
