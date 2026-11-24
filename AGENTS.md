@@ -5,6 +5,9 @@ For the people and coding agents who change this code. People who use the librar
 ## Before you finish
 
 - `pnpm test` passes: a strict TypeScript build, then every test.
+- Beside it, reporting only for now: `pnpm lint` (oxlint, knip), `pnpm lint:style` (`pnpm format` applies Prettier),
+  `pnpm check:lines` (500 lines a file), `pnpm test:coverage` and `pnpm check:security` (nothing about the project
+  leaves this computer; CI adds pnpm audit). Each turns required in CI once the code passes it.
 - A change in behaviour comes with a test. Every invariant below has one.
 - README.md stays at 50 lines or fewer.
 
@@ -26,7 +29,8 @@ For the people and coding agents who change this code. People who use the librar
 
 ## Map
 
-- `app.ts`: runs, calls, delegation and the MCP server. `catalog.ts`: compiling and checking a graph.
+- `app.ts`: `createApp` and its types, what a host calls. `runs.ts`: runs, their grants, lifetimes and delegation.
+- `calls.ts`: a run's calls, through its adapters and the inbox. `server.ts`: a run's MCP server. `catalog.ts`: compiling and checking a graph.
 - `discovery.ts`: the `discover` and `invoke` tools. `store.ts`: SQLite, approvals and the event log.
 - `broker.ts`: launching the harness and the workspace tools. `connectors.ts`: ready-made adapters.
 - `preview.ts`: the approval view for browsers. `errors.ts`, `json.ts`, `limits.ts`: shared helpers.

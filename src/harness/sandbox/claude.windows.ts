@@ -2,7 +2,8 @@
 // and its Agent SDK options), so each line can be held against its documentation. Its sandbox here is its own for
 // Windows: commands run as its sandbox group, with permissions on the folders they may use. It doesn't start in the home
 // folder itself, or in a folder holding it. Where its shell keeps its own temporary files here is its sandbox's to say;
-// these settings were run on macOS, not here. Guarantees, each asserted for every system's file by test/harness.test.mjs:
+// these settings were run on macOS, not here. Guarantees, each asserted for every system's file by
+// test/harness-sandbox.test.mjs:
 // - every command runs in the sandbox, none outside it, and where the sandbox can't start, nothing runs;
 // - commands reach no network at all: everything outside the computer goes through the host's tools (MCP);
 // - they write only in the run's folder (only at work), its own scratch folder inside it, and its shell's own temporary
@@ -20,7 +21,7 @@ import { AGENT_SETTINGS, type Places } from "./places.js"
 const WORK_TOOLS = ["Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "Bash", "TaskStop", "Agent", "ToolSearch", "TodoWrite", "AskUserQuestion"]
 const WRITING_TOOLS = ["Write", "Edit", "NotebookEdit"]
 
-export default function claudeOnWindows(p: Places, purpose: "work" | "read") {
+export function claudeOnWindows(p: Places, purpose: "work" | "read") {
   return {
     tools: purpose === "work" ? WORK_TOOLS : WORK_TOOLS.filter((tool) => !WRITING_TOOLS.includes(tool)),
     sandbox: {

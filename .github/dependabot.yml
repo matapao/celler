@@ -1,12 +1,16 @@
 # Keeps celler's dependencies at their latest stable versions, the agent SDKs among them. A pull request that updates
 # an agent SDK also sets agentVersions in src/limits.ts to the version of the agent it is made with (AGENTS.md); its
 # test says so until it does.
+# Each update waits a week after its release, the agent SDKs' too: the same wait as pnpm's minimumReleaseAge
+# (pnpm-workspace.yaml). Security updates come at once.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: daily
+    cooldown:
+      default-days: 7
     groups:
       agent-sdks:
         patterns: ["@anthropic-ai/claude-agent-sdk", "@openai/codex-sdk"]
@@ -14,3 +18,5 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7

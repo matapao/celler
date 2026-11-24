@@ -169,5 +169,6 @@ export function failedRun(error: string, runtimeDown = false): RunHandle {
 }
 
 export function errorText(err: unknown): string {
-  return typeof err === "object" && err !== null && typeof (err as { message?: unknown }).message === "string" ? (err as { message: string }).message : String(err)
+  if (typeof err === "object" && err !== null && "message" in err && typeof err.message === "string") return err.message
+  return String(err)
 }

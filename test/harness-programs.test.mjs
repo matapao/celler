@@ -1,0 +1,193 @@
+import assert from "node:assert/strict"
+import test from "node:test"
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
+import { fileURLToPath } from "node:url"
+import { AgentRuntime, chosenPrograms, claudeAgent, codexAgent, findProgram } from "celler/harness"
+import { agentVersions } from "../dist/limits.js"
+import { agentEnv, CODEX_TARGETS, codexProgram } from "../dist/harness/programs.js"
+import { claudeWords, codexHome, codexWords, fakeClaude, fakeCodex, host, inFolder, sentTo, spec } from "./support-harness.mjs"
+
+test("Claude Code says in the host's words when its program isn't there", async () => {
+  const missing = new AgentRuntime(claudeAgent({ claude: () => null, words: claudeWords }), host)
+  const health = await missing.health(false)
+  assert.deepEqual([health.ok, health.fix, health.detail], [false, "find", claudeWords.noClaude])
+  const run = await missing.run(spec(), () => undefined).done
+  assert.deepEqual([run.runtimeDown, run.error], [true, claudeWords.noClaude])
+  assert.deepEqual(missing.login(), { error: claudeWords.noClaude })
+})
+
+test("Codex's health says, in the host's words, when it isn't found, when it is too old and when it isn't signed in for the host", () => inFolder(async dir => {
+  const home = path.join(dir, "home")
+  const notFound = await new AgentRuntime(codexAgent({ codex: () => null, home, words: codexWords }), host).health(false)
+  assert.deepEqual([notFound.fix, notFound.detail], ["find", `Codex wasn't found on this computer. ${codexWords.install}`])
+  // A Codex CLI that says its version, and isn't signed in.
+  const cli = version => {
+    const file = path.join(dir, `codex-${version}`)
+    writeFileSync(file, `#!/usr/bin/env node\nif (process.argv[2] === '--version') console.log('codex-cli ${version}')\nelse process.exit(1)\n`)
+    chmodSync(file, 0o755)
+    return file
+  }
+  const signedOut = await new AgentRuntime(codexAgent({ codex: () => cli(agentVersions.codex), home, words: codexWords }), host).health(false)
+  assert.deepEqual([signedOut.fix, signedOut.detail], ["login", `Codex ${agentVersions.codex} · ${codexWords.signedOut}`])
+  // One older than its SDK is made with, which no run would work with.
+  const old = await new AgentRuntime(codexAgent({ codex: () => cli("0.160.0"), home, words: codexWords }), host).health(false)
+  assert.deepEqual([old.ok, old.detail], [false, `Codex 0.160.0 is older than ${agentVersions.codex}, the oldest that runs here: update it.`])
+}))
+
+test("each agent's oldest program that runs is the one its installed SDK is made with", () => {
+  const sdk = name => JSON.parse(readFileSync(fileURLToPath(new URL(`../node_modules/${name}/package.json`, import.meta.url)), "utf8"))
+  assert.equal(agentVersions.claude, sdk("@anthropic-ai/claude-agent-sdk").claudeCodeVersion)
+  assert.equal(agentVersions.codex, sdk("@openai/codex-sdk").dependencies["@openai/codex"])
+})
+
+test("a run starts only an agent's program new enough to run, with no health check before it, and asks its version again once it changes", () => inFolder(async dir => {
+  const program = path.join(dir, "claude")
+  const asked = path.join(dir, "asked.log")
+  const started = path.join(dir, "started.log")
+  // A program that says its version, and otherwise only that it was started.
+  const says = version => {
+    writeFileSync(program, [
+      "#!/usr/bin/env node",
+      'const fs = require("node:fs")',
+      `if (process.argv[2] === "--version") fs.appendFileSync(${JSON.stringify(asked)}, "${version}\\n"), console.log("${version} (Claude Code)")`,
+      `else fs.appendFileSync(${JSON.stringify(started)}, "started\\n")`,
+    ].join("\n"))
+    chmodSync(program, 0o755)
+  }
+  says("2.1.30")
+  const runtime = new AgentRuntime(claudeAgent({ claude: () => program, words: claudeWords }), host)
+  for (let i = 0; i < 2; i++) {
+    const old = await runtime.run(spec({ cwd: dir }), () => undefined).done
+    assert.deepEqual([old.ok, old.runtimeDown, old.error], [false, true, `Claude Code 2.1.30 is older than ${agentVersions.claude}, the oldest that runs here: update it.`])
+  }
+  // Asked once, never started.
+  assert.deepEqual([readFileSync(asked, "utf8"), existsSync(started)], ["2.1.30\n", false])
+  // Updated, it is asked again, and started.
+  says(agentVersions.claude)
+  const updated = await runtime.run(spec({ cwd: dir }), () => undefined).done
+  assert.equal(updated.runtimeDown, false)
+  assert.deepEqual([readFileSync(asked, "utf8"), existsSync(started)], [`2.1.30\n${agentVersions.claude}\n`, true])
+  // Its version known, as after a health check, its agent starts as its run does: its process is there at once.
+  const known = new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: path.join(dir, "agent.jsonl") }), host)
+  await known.health(false)
+  const handle = known.run(spec({ cwd: dir }), () => undefined)
+  assert.ok(handle.pid)
+  assert.equal((await handle.done).ok, true)
+}))
+
+test("Codex installed with npm runs as its own program, found as npm's wrapper finds it, with its helpers on PATH", () => inFolder(dir => {
+  const platform = `${process.platform}-${process.arch}`
+  const target = CODEX_TARGETS[platform]
+  if (!target || process.platform === "win32") return
+  // npm's layout: the wrapper in its package, Codex's own program in the package for this system beside it.
+  const pkg = path.join(dir, "lib", "node_modules", "@openai", "codex")
+  mkdirSync(path.join(pkg, "bin"), { recursive: true })
+  writeFileSync(path.join(pkg, "bin", "codex.js"), "")
+  const own = path.join(pkg, "node_modules", "@openai", `codex-${platform}`)
+  mkdirSync(path.join(own, "vendor", target, "bin"), { recursive: true })
+  mkdirSync(path.join(own, "vendor", target, "codex-path"))
+  writeFileSync(path.join(own, "package.json"), "{}")
+  writeFileSync(path.join(own, "vendor", target, "bin", "codex"), "")
+  mkdirSync(path.join(dir, "bin"))
+  symlinkSync(path.join(pkg, "bin", "codex.js"), path.join(dir, "bin", "codex"))
+  const real = realpathSync(own)
+  assert.deepEqual(codexProgram(path.join(dir, "bin", "codex")), { program: path.join(real, "vendor", target, "bin", "codex"), path: [path.join(real, "vendor", target, "codex-path")] })
+  // Its own program from another installer starts as it is.
+  writeFileSync(path.join(dir, "codex-native"), "")
+  assert.deepEqual(codexProgram(path.join(dir, "codex-native")), { program: realpathSync(path.join(dir, "codex-native")), path: [] })
+}))
+
+test("an agent's program is found on PATH only in the folders it names in full, never one relative to where the host is", () => inFolder(dir => {
+  mkdirSync(path.join(dir, "bin"))
+  writeFileSync(path.join(dir, "bin", "claude"), "#!/bin/sh\n")
+  chmodSync(path.join(dir, "bin", "claude"), 0o755)
+  const was = { path: process.env.PATH, cwd: process.cwd() }
+  try {
+    // Where its installers put it, if anywhere on this computer: null here.
+    process.env.PATH = ""
+    const installed = findProgram("claude")
+    process.chdir(dir)
+    process.env.PATH = "bin"
+    assert.equal(findProgram("claude"), installed)
+  } finally {
+    process.env.PATH = was.path
+    process.chdir(was.cwd)
+  }
+}))
+
+test("Codex's own errands use its own sign-in, in its home: no key, token or endpoint from the person's shell", () => {
+  const names = ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_BASE_URL"]
+  const was = names.map(name => process.env[name])
+  for (const name of names) process.env[name] = "from-the-shell"
+  try {
+    const env = agentEnv(codexAgent({ codex: () => null, home: codexHome, words: codexWords }).env(host), host)
+    assert.deepEqual([names.filter(name => env[name] !== undefined), env.CODEX_HOME], [[], codexHome])
+  } finally {
+    names.forEach((name, i) => (was[i] === undefined ? delete process.env[name] : (process.env[name] = was[i])))
+  }
+})
+
+test("where the person showed the host each program is kept in full, in a folder made for it", () => inFolder(dir => {
+  const file = path.join(dir, "settings", "programs.json")
+  const chosen = chosenPrograms(file)
+  assert.throws(() => chosen.set("claude", path.join("bin", "claude")), /isn't a full path/)
+  const claude = path.join(dir, "bin", "claude")
+  chosen.set("claude", claude)
+  assert.equal(chosenPrograms(file).get("claude"), claude)
+}))
+
+test("an agent that isn't signed in takes its runtime offline in the host's words, and a session that is gone says so", () => inFolder(async dir => {
+  const claude = await new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: path.join(dir, "claude.jsonl"), FAKE_CLAUDE_SIGNED_OUT: "1" }), host).run(spec({ cwd: dir }), () => undefined).done
+  assert.deepEqual([claude.ok, claude.runtimeDown, claude.error], [false, true, claudeWords.login])
+  const home = codexHome
+  const codexLog = path.join(dir, "codex.jsonl")
+  const codex = await new AgentRuntime(fakeCodex(home, { FAKE_CODEX_LOG: codexLog, FAKE_CODEX_SIGNED_OUT: "1" }), host).run(spec({ cwd: dir }), () => undefined).done
+  assert.deepEqual([codex.ok, codex.runtimeDown, codex.error], [false, true, codexWords.login])
+  // A connector's server that says 401 is no sign-in of Codex's own: the run failed, Codex didn't.
+  const connector = await new AgentRuntime(fakeCodex(home, { FAKE_CODEX_LOG: codexLog, FAKE_CODEX_MCP_401: "1" }), host).run(spec({ cwd: dir }), () => undefined).done
+  assert.deepEqual([connector.ok, connector.runtimeDown], [false, false])
+  const gone = await new AgentRuntime(fakeCodex(home, { FAKE_CODEX_LOG: codexLog }), host).run(spec({ cwd: dir, resume: true, sessionId: "missing" }), () => undefined).done
+  assert.deepEqual([gone.ok, gone.runtimeDown, gone.error], [false, false, "Session missing could not be resumed: not found"])
+}))
+
+test("a deep health check test-runs the agent once, as a model-only run with no tools, and says how it went", () => inFolder(async dir => {
+  const log = path.join(dir, "agent.jsonl")
+  const prompts = () => sentTo(log).filter(e => e.what === "prompt")
+  const runtime = new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log }), host)
+  const healthy = await runtime.health(true)
+  assert.deepEqual([healthy.ok, healthy.detail], [true, `Claude Code ${agentVersions.claude} · test run succeeded`])
+  assert.equal(prompts()[0].data.text, "Reply with exactly: OK")
+  const opened = sentTo(log).find(e => e.what === "started").data
+  assert.equal(sentTo(log).find(e => e.what === "initialize").data.mcpServers, undefined)
+  // In an empty folder of its own, never the temporary folder other programs share, and gone after it.
+  assert.equal(path.dirname(opened.cwd), realpathSync(os.tmpdir()))
+  assert.match(path.basename(opened.cwd), /^celler-test-run-/)
+  assert.equal(existsSync(opened.cwd), false)
+  // Without deep, no run at all.
+  assert.deepEqual([(await runtime.health(false)).detail, prompts().length], [`Claude Code ${agentVersions.claude} (not yet test-run)`, 1])
+  // A test run that doesn't finish in its time: not healthy, and why.
+  const slow = await new AgentRuntime({ ...fakeClaude({ FAKE_CLAUDE_LOG: log }), testRunMs: 1 }, host).health(true)
+  assert.deepEqual([slow.ok, slow.detail], [false, `Claude Code ${agentVersions.claude} · Timed out after 0 s`])
+  // A sign-in it still has but that no longer works: its test run says so, and the host can offer the sign-in again.
+  const expired = await new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_EXPIRED: "1" }), host).health(true)
+  assert.deepEqual([expired.ok, expired.fix, expired.detail], [false, "login", `Claude Code ${agentVersions.claude} · ${claudeWords.login}`])
+}))
+
+test("an agent's own sign-in gives its page's address as it is, from either of its outputs, and can be called off", async () => {
+  // Claude Code's, as a terminal link (OSC 8): its address, then the same as its words.
+  const url = "https://claude.ai/oauth/authorize?code=true&client_id=fake-id&state=a_b-c"
+  for (const env of [{ FAKE_CLAUDE_LOGIN_URL: url }, { FAKE_CLAUDE_LOGIN_URL: url, FAKE_CLAUDE_LOGIN_ON_STDERR: "1" }]) {
+    const login = new AgentRuntime(fakeClaude(env), host).login()
+    try {
+      assert.equal(await Promise.race([login.url, delay(5_000).then(() => "no address in 5 s")]), url)
+    } finally {
+      login.cancel()
+    }
+    // Called off, it ends.
+    const ended = await Promise.race([login.done, delay(5_000).then(() => "still going")])
+    assert.equal(ended.ok, false)
+  }
+})

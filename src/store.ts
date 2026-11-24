@@ -296,8 +296,8 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
           resolve()
         }
         const onAbort = () => {
-          set!.delete(wake)
-          if (set!.size === 0) waiters.delete(id)
+          set.delete(wake)
+          if (set.size === 0) waiters.delete(id)
           reject(signal.reason)
         }
         set.add(wake)
@@ -358,6 +358,27 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
     })
   }
 
+  function history(owner: string, id: string): HistoryEvent[] {
+    if (loadRun(id).run.owner !== owner) fail("NOT_FOUND", "Unknown run")
+    return selectEvents.all(id).map(row => ({
+      seq: Number(row.seq),
+      at: Number(row.at),
+      kind: String(row.kind) as EventKind,
+      detail: JSON.parse(String(row.detail)) as unknown,
+    }))
+  }
+
+  function inbox(owner: string): ApprovalSummary[] {
+    return selectInbox.all(owner).map(row => ({
+      id: String(row.id),
+      run: String(row.run),
+      tool: String(row.tool),
+      state: String(row.state) as ApprovalState,
+      runStatus: String(row.run_status) as RunStatus,
+      createdAt: Number(row.created_at),
+    }))
+  }
+
   return {
     saveRevision(config: unknown) {
       const id = randomUUID()
@@ -376,27 +397,12 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
         record(run.id, "started", detail)
       })
     },
-    history(owner: string, id: string): HistoryEvent[] {
-      if (loadRun(id).run.owner !== owner) fail("NOT_FOUND", "Unknown run")
-      return selectEvents.all(id).map(row => ({
-        seq: Number(row.seq),
-        at: Number(row.at),
-        kind: String(row.kind) as EventKind,
-        detail: JSON.parse(String(row.detail)) as unknown,
-      }))
-    },
-    inbox(owner: string): ApprovalSummary[] {
-      return selectInbox.all(owner).map(row => ({
-        id: String(row.id),
-        run: String(row.run),
-        tool: String(row.tool),
-        state: String(row.state) as ApprovalState,
-        runStatus: String(row.run_status) as RunStatus,
-        createdAt: Number(row.created_at),
-      }))
-    },
+    history,
+    inbox,
     /** The runs a run delegated, whatever process started them. */
     children: (id: string) => selectChildren.all(id).map(row => String(row.id)),
     decline, reconcile, ended, finishRun, loadRun, record, existingApproval, stage, result, review, approve,
   }
 }
+
+export type Store = ReturnType<typeof openStore>

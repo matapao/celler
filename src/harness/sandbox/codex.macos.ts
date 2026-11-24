@@ -1,7 +1,7 @@
 // Codex on macOS: what every run of it starts with, in Codex's own settings (the keys of its config.toml), so each line
 // can be held against its documentation. Its sandbox here is macOS's own (Seatbelt). Codex takes them for the run on
 // its command line, and loads no folder's own settings, as no folder is trusted in its home. Guarantees, each asserted
-// for every system's file by test/harness.test.mjs:
+// for every system's file by test/harness-sandbox.test.mjs:
 // - every command runs in the sandbox, and what would go beyond it Codex refuses itself, asking no one;
 // - commands reach no network at all: everything outside the computer goes through the host's tools (MCP);
 // - they write only in the run's folder (only at work) and its own scratch folder inside it, and never touch the
@@ -22,7 +22,7 @@ const SETTINGS = Object.fromEntries(AGENT_SETTINGS.flatMap((name) => [[`**/${nam
 /** Each of these places with one access, as Codex's filesystem table takes them. */
 const each = (places: string[], access: "read" | "write" | "deny") => Object.fromEntries(places.map((place) => [place, access]))
 
-export default function codexOnMacos(p: Places, purpose: "work" | "read") {
+export function codexOnMacos(p: Places, purpose: "work" | "read") {
   return {
     // The run's own permission profile, the only one it runs in.
     default_permissions: "run",

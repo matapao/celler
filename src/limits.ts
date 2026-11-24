@@ -96,7 +96,8 @@ export const harnessLimits = {
 
 /**
  * The oldest of each agent's own programs a run starts: the version its SDK is made with (the Claude Agent SDK's
- * `claudeCodeVersion`, the Codex SDK's `@openai/codex`), which test/harness.test.mjs holds against the installed SDKs.
+ * `claudeCodeVersion`, the Codex SDK's `@openai/codex`), which test/harness-programs.test.mjs holds against the
+ * installed SDKs.
  */
 export const agentVersions = { claude: "2.1.330", codex: "0.171.0" }
 

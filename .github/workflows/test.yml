@@ -1,5 +1,5 @@
-# The build and every test, on every push and pull request, on Node 24 (package.json's engines), on Linux and on macOS,
-# whose agents' sandboxes and folders' names differ; holds no secrets.
+# The build, the lint (oxlint and knip), the line limits and every test, on every push and pull request, on Node 24
+# (package.json's engines), on Linux and on macOS, whose agents' sandboxes and folders' names differ; holds no secrets.
 
 name: Test
 
@@ -31,4 +31,6 @@ jobs:
       - run: corepack enable pnpm
 
       - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm check:lines
       - run: pnpm test

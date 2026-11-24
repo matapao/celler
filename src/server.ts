@@ -1,0 +1,178 @@
+import { InMemoryTaskStore } from "@modelcontextprotocol/sdk/experimental/tasks/stores/in-memory.js"
+import { Server } from "@modelcontextprotocol/sdk/server/index.js"
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
+import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js"
+import type { CallToolResult, Task, Tool } from "@modelcontextprotocol/sdk/types.js"
+import type { Calls } from "./calls.js"
+import { createDiscovery, invocation, invokeTool } from "./discovery.js"
+import { fail, parseWith, CellerError } from "./errors.js"
+import { hash } from "./json.js"
+import type { appLimits } from "./limits.js"
+import type { Runs } from "./runs.js"
+import type { Run, Store } from "./store.js"
+
+/** The client's own key for a call, if it gave one: a malformed one is its mistake, answered as a protocol error. */
+function callIdOf(meta: Record<string, unknown> | undefined, maxChars: number): string | undefined {
+  const key = meta?.["celler/call-id"]
+  if (key === undefined) return undefined
+  // oxlint-disable-next-line no-control-regex -- a key may hold no control character: this finds them on purpose
+  if (typeof key !== "string" || key.length === 0 || key.length > maxChars || /[\x00-\x1f\x7f]/.test(key)) {
+    throw new McpError(ErrorCode.InvalidParams, "Invalid celler/call-id metadata key")
+  }
+  return key
+}
+
+// Failures return as results the model can read and act on (MCP 2025-11-25). Only this library's own messages
+// show: raw host, adapter and SQLite errors never reach the harness.
+function refusal(error: unknown): CallToolResult {
+  const text = error instanceof CellerError ? error.message : "Tool execution failed"
+  return { isError: true, content: [{ type: "text", text }] }
+}
+
+// The SDK reports tasks/cancel only as a status change, so this is where a cancelled task's work stops.
+class TaskWork extends InMemoryTaskStore {
+  readonly work = new Map<string, AbortController>()
+  override async updateTaskStatus(taskId: string, status: Task["status"], message?: string, sessionId?: string) {
+    if (status === "cancelled") this.work.get(taskId)?.abort()
+    return super.updateTaskStatus(taskId, status, message, sessionId)
+  }
+}
+
+/**
+ * A run's MCP server, one for each connection its agent opens: the tools it lists, the calls and tasks it takes, and
+ * the word that the tools changed, to one run's connections or to all.
+ */
+export function createServer(runs: Runs, call: Calls["call"], store: Store, limits: typeof appLimits) {
+  const discovery = createDiscovery(limits)
+  const connections = new Map<string, Set<Server>>() // run id → its open MCP connections
+
+  async function connect(run: Run, channel: Transport, native = false) {
+    const tasks = new TaskWork()
+    const server = new Server({ name: "celler", version: "0.1.0" }, {
+      capabilities: { tools: { listChanged: true }, tasks: { list: {}, cancel: {}, requests: { tools: { call: {} } } } },
+      taskStore: tasks,
+    })
+    const current = runs.graph(run.revision)
+    const connection = new AbortController()
+    let advertised: Set<string> | undefined
+    let invokeAdvertised = false
+
+    function menu() {
+      runs.checkAncestors(run)
+      const tools: Tool[] = []
+      let jsonBytes = 2 // "[]"
+      for (const id of current.view(run.entry, runs.access(run)).keys()) {
+        const meta = current.meta(id)
+        if (meta.kind === "tool") {
+          tools.push(meta.exposed)
+          jsonBytes += meta.exposedBytes + (tools.length > 1 ? 1 : 0)
+        }
+      }
+      // Once a connection moves to discover and invoke it stays there, so the model's `invoke` calls keep working.
+      if (!invokeAdvertised && (native || jsonBytes <= limits.discoveryBytes)) {
+        return { tools: [...tools, discovery.tool] }
+      }
+      invokeAdvertised = true
+      const pins = new Set(current.cell(run.entry).pins)
+      return { tools: [...tools.filter(tool => pins.has(tool.name)), discovery.tool, invokeTool] }
+    }
+
+    // The tools this connection is listed, in celler's words when the host's policy or the database fails: never raw
+    // errors across the MCP boundary.
+    function list(signal: AbortSignal) {
+      try {
+        const result = menu()
+        advertised = new Set(result.tools.map(tool => tool.name))
+        return result
+      } catch (error) {
+        if (error instanceof CellerError || signal.aborted) throw error
+        fail("UNAVAILABLE", "Tool listing failed")
+      }
+    }
+
+    server.setRequestHandler(ListToolsRequestSchema, (_request, extra) => list(extra.signal))
+    server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
+      // Before a call's own answer, as when the database fails as it begins, only this library's errors go out too.
+      try {
+        if (!advertised) list(extra.signal)
+        if (!advertised!.has(params.name)) throw new McpError(ErrorCode.InvalidParams, "Unknown tool: " + params.name)
+        const callId = callIdOf(params._meta, limits.callIdChars)
+        // The request or task, the connection, or the run can end this call. Approvals and delegated runs outlive it.
+        const owned = store.ended(run.id) ? [] : [runs.lifetime(run.id)]
+        // Whatever goes wrong from here, an adapter's or the host's own error too, the model reads in celler's words.
+        async function respond(signal: AbortSignal, heartbeat?: () => void): Promise<CallToolResult> {
+          try {
+            const args = params.arguments ?? {}
+            if (params.name === "discover") {
+              runs.checkAncestors(run)
+              return { content: [{ type: "text", text: discovery.discover(current, run.entry, runs.access(run), args) }] }
+            }
+            const request = params.name === "invoke"
+              ? parseWith(invocation, "invoke arguments", args)
+              : { name: params.name, arguments: args }
+            // Without `celler/call-id`, the tool and arguments are the key, so a blind retry joins the first call's
+            // approval or child run.
+            const key = callId ?? hash([request.name, request.arguments])
+            return await call(run, request.name, request.arguments, key, signal, { heartbeat, asTask: !!params.task })
+          } catch (error) {
+            // Cut off by its run's end, a call hears that, never what its adapter threw as it stopped.
+            const runEnded = owned.some(lifetimeSignal => lifetimeSignal.aborted)
+            return refusal(runEnded ? new CellerError("RUN_ENDED", "Run has ended") : error)
+          }
+        }
+
+        if (!params.task) {
+          const progressToken = extra._meta?.progressToken
+          let progress = 0
+          const heartbeat = progressToken === undefined ? undefined : () => void extra.sendNotification({
+            method: "notifications/progress",
+            params: { progressToken, progress: ++progress, message: "Still working" },
+          }).catch(() => {})
+          return await respond(AbortSignal.any([extra.signal, connection.signal, ...owned]), heartbeat)
+        }
+        // A connection holds only so many tasks, none kept longer than the app keeps one: MCP lets the receiver say.
+        if (tasks.getAllTasks().length >= limits.maxTasks) fail("LIMIT_EXCEEDED", "Too many tasks on this connection")
+        const ttl = Math.min(params.task.ttl ?? limits.taskTtlMs, limits.taskTtlMs)
+        const task = await extra.taskStore!.createTask({ ttl })
+        const work = new AbortController()
+        tasks.work.set(task.taskId, work)
+        void respond(AbortSignal.any([work.signal, connection.signal, ...owned]))
+          .then(async result => {
+            // A cancelled task keeps its status; any other outcome is stored for tasks/result.
+            if (!work.signal.aborted) await extra.taskStore!.storeTaskResult(task.taskId, result.isError ? "failed" : "completed", result)
+          })
+          .catch(() => {})
+          .finally(() => tasks.work.delete(task.taskId))
+        return { task }
+      } catch (error) {
+        if (error instanceof McpError || error instanceof CellerError) throw error
+        fail("UNAVAILABLE", "Tool execution failed")
+      }
+    })
+
+    const group = connections.get(run.id) ?? new Set<Server>()
+    connections.set(run.id, group)
+    group.add(server)
+    function forget() {
+      connection.abort()
+      // Its tasks were this connection's alone: nothing can ask for them now, and their timers would outlive it.
+      tasks.cleanup()
+      group.delete(server)
+      if (group.size === 0 && connections.get(run.id) === group) connections.delete(run.id)
+    }
+    server.onclose = forget
+    try {
+      await server.connect(channel)
+    } catch (error) {
+      forget() // a connection that never started is no one's to tell
+      throw error
+    }
+  }
+
+  async function notifyToolsChanged(runId?: string) {
+    const targets = runId ? [...(connections.get(runId) ?? [])] : [...connections.values()].flatMap(set => [...set])
+    await Promise.allSettled(targets.map(server => server.sendToolListChanged()))
+  }
+
+  return { connect, notifyToolsChanged }
+}

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { fail } from "./errors.js"
 import { jsonDepth } from "./limits.js"
 
@@ -33,9 +34,21 @@ export function normalizeJson(value: unknown, seen = new Set<object>()): JsonVal
   }
 }
 
+/** Two of an object's entries in the order of their keys, compared as `<` compares strings. */
+function byKey([a]: [string, unknown], [b]: [string, unknown]): number {
+  if (a < b) return -1
+  if (a > b) return 1
+  return 0
+}
+
 /** JSON text with object keys sorted, so equal values always give equal text (`-0` and `0` included). */
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(value, (_key, item: unknown) => item && typeof item === "object" && !Array.isArray(item)
-    ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+    ? Object.fromEntries(Object.entries(item).sort(byKey))
     : item)
+}
+
+/** The SHA-256 of a value's canonical JSON, in hex: equal values hash alike. */
+export function hash(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex")
 }

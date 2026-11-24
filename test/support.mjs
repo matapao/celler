@@ -41,6 +41,14 @@ export async function withClient(connect, work, native = false) {
     await client.close()
   }
 }
+/** A tool call through `client`, which is closed once the call has settled, before the call's outcome is given. */
+export async function callThenClose(client, request) {
+  try {
+    return await client.callTool(request)
+  } finally {
+    await client.close()
+  }
+}
 export async function discover(client, args) {
   const result = await client.callTool({ name: "discover", arguments: args })
   if (result.isError) throw Error(result.content[0].text)

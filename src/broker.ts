@@ -139,8 +139,8 @@ export function createBroker(command: BrokerCommand, allowed: Platform["allowed"
         shell: false,
       }))
       // Untrusted stderr never reaches the host's own streams; draining it keeps the child from blocking.
-      if (command.onStderr) running.stderr!.on("data", command.onStderr)
-      else running.stderr!.resume()
+      if (command.onStderr) running.stderr.on("data", command.onStderr)
+      else running.stderr.resume()
 
       const channel = connect ? (running.stdio[3] as Duplex) : undefined
       transport = channel ? new StdioServerTransport(channel, channel, { maxBufferSize: limits.inlineLimit }) : undefined
@@ -154,7 +154,7 @@ export function createBroker(command: BrokerCommand, allowed: Platform["allowed"
       exit.catch(() => {}) // a throw before `await exit` must not leave it unhandled
 
       if (connect && transport) await connect(transport, nativeDiscovery)
-      const writeStdin = pipeline(Readable.from([body]), running.stdin!).catch(async (error: NodeJS.ErrnoException) => {
+      const writeStdin = pipeline(Readable.from([body]), running.stdin).catch(async (error: NodeJS.ErrnoException) => {
         await exit // a failed exit explains a broken pipe better than the pipe error does
         if (error.code !== "EPIPE") throw error // a broker may answer without reading all of its input
       })
@@ -162,7 +162,7 @@ export function createBroker(command: BrokerCommand, allowed: Platform["allowed"
       const chunks: Buffer[] = []
       let bytes = 0
       // An abort ends the read too, so a broker that outlives SIGTERM with its output open is still stopped below.
-      for await (const chunk of addAbortSignal(signal, running.stdout!)) {
+      for await (const chunk of addAbortSignal(signal, running.stdout)) {
         bytes += chunk.length
         if (bytes > limits.inlineLimit) fail("LIMIT_EXCEEDED", "Broker result exceeds inline limit")
         chunks.push(chunk)

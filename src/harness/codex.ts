@@ -6,9 +6,9 @@ import { Codex, type FileChangeItem, type ModelReasoningEffort, type ThreadEvent
 import { harnessLimits as L } from "../limits.js"
 import { VALUES } from "./programs.js"
 import { forThisSystem, promptOf, saysSignedOut, type Turn } from "./runtime.js"
-import codexOnLinux from "./sandbox/codex.linux.js"
-import codexOnMacos from "./sandbox/codex.macos.js"
-import codexOnWindows from "./sandbox/codex.windows.js"
+import { codexOnLinux } from "./sandbox/codex.linux.js"
+import { codexOnMacos } from "./sandbox/codex.macos.js"
+import { codexOnWindows } from "./sandbox/codex.windows.js"
 import { outside } from "./sandbox/places.js"
 import { emptyUsage, errorText, isTier, type ModelTier, type RunResult, type RunSpec } from "./types.js"
 
@@ -40,16 +40,20 @@ function toml(value: unknown): string {
   throw new Error(`Codex can't be given ${String(value)} as a setting`)
 }
 
+/** Settings as Codex's `--config` takes them: one `key=value` each, the value as TOML. */
+const overrides = (settings: Record<string, unknown>) => Object.entries(settings).map(([key, value]) => `${key}=${toml(value)}`)
+
 /**
  * Its settings for the run as Codex takes them on its command line, one whole table per key: a key's dots are its own
  * there, so a table keyed by paths goes inline. The connectors' values aren't among them: they are in `values`, the
  * variables Codex reads them from, which its commands never get.
  */
-function settingsFor(t: Turn, values: Record<string, string>): string[] {
+function settingsFor(t: Turn): { settings: string[]; values: Record<string, string> } {
   const { spec } = t
   const own = forThisSystem(CODEX_ON, "Codex")(t.places, spec.purpose === "work" ? "work" : "read")
+  const values: Record<string, string> = {}
   // A model-only decision runs no command, and gets no MCP server, not even the run's own.
-  if (spec.purpose === "inference") return Object.entries({ ...own, features: { ...own.features, shell_tool: false } }).map(([k, v]) => `${k}=${toml(v)}`)
+  if (spec.purpose === "inference") return { settings: overrides({ ...own, features: { ...own.features, shell_tool: false } }), values }
   const valueOf = (value: string) => {
     const name = `${VALUES}${Object.keys(values).length}`
     values[name] = value
@@ -60,7 +64,7 @@ function settingsFor(t: Turn, values: Record<string, string>): string[] {
   const servers = Object.fromEntries(
     spec.mcpServers.map((s) => [s.name, { url: s.url, env_http_headers: Object.fromEntries(Object.entries(s.headers).map(([name, value]) => [name, valueOf(value)])), default_tools_approval_mode: "approve", tool_timeout_sec: L.mcpCallMs / 1000 }]),
   )
-  return Object.entries({ ...own, mcp_servers: servers }).map(([k, v]) => `${k}=${toml(v)}`)
+  return { settings: overrides({ ...own, mcp_servers: servers }), values }
 }
 
 /** The cells' texts, then the person's words, set apart by a rule, and the files given with them; pictures to see too. */
@@ -75,8 +79,7 @@ export async function runCodex(t: Turn, o: { models: Record<ModelTier, string>; 
   const { spec } = t
   const model = isTier(spec.model) ? o.models[spec.model] : spec.model
   const effort = EFFORTS.find((e) => e === spec.effort)
-  const values: Record<string, string> = {}
-  const configOverrides = settingsFor(t, values)
+  const { settings: configOverrides, values } = settingsFor(t)
   // Its environment as given, nothing of this process's besides: the SDK passes on no other.
   const env = Object.fromEntries(Object.entries({ ...t.env, ...values }).filter((e): e is [string, string] => e[1] !== undefined))
   const codex = new Codex({ codexPathOverride: t.program, env, configOverrides })

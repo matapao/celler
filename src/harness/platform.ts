@@ -221,7 +221,8 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
   }
 
   return {
-    allowed: o.allowed,
+    // Asked on the host's own object, as each of its hooks is, though createApp asks it of this platform.
+    allowed: o.allowed.bind(o),
     waiting: (run) => hold(run.id),
     async launch(run, connect, signal): Promise<CallToolResult> {
       signal.throwIfAborted()
@@ -243,7 +244,8 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
         // The run may have been cancelled, or the platform closed, while its MCP server was opening.
         signal.throwIfAborted()
         throwIfClosed()
-        const ask = o.ask
+        // Asked on the host's own object, as each of its hooks is: an ask that is a method of its own works too.
+        const ask = o.ask?.bind(o)
         let handle: RunHandle
         try {
           handle = runtime.run(

@@ -128,6 +128,6 @@ test("a broker that answers with something other than a tool result fails in cel
   for (const output of ["not json", JSON.stringify({ content: 1 })]) {
     const { adapters } = createBroker({ executable: process.execPath, args: ["-e", `process.stdout.write(${JSON.stringify(output)})`] }, () => true)
     await assert.rejects(adapters.get("fs.read").call(run, { path: "x" }, AbortSignal.timeout(5000)),
-      error => error.name === "CellerError" && error.code === "BROKER_ERROR" && /^Broker result/.test(error.message))
+      error => error.name === "CellerError" && error.code === "BROKER_ERROR" && error.message.startsWith("Broker result"))
   }
 })

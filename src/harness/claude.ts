@@ -17,9 +17,9 @@ import {
 } from "@anthropic-ai/claude-agent-sdk"
 import { harnessLimits as L } from "../limits.js"
 import { forThisSystem, promptOf, saysSignedOut, type Turn } from "./runtime.js"
-import claudeOnLinux from "./sandbox/claude.linux.js"
-import claudeOnMacos from "./sandbox/claude.macos.js"
-import claudeOnWindows from "./sandbox/claude.windows.js"
+import { claudeOnLinux } from "./sandbox/claude.linux.js"
+import { claudeOnMacos } from "./sandbox/claude.macos.js"
+import { claudeOnWindows } from "./sandbox/claude.windows.js"
 import { outside } from "./sandbox/places.js"
 import { emptyUsage, errorText, isTier, type AgentAsk, type AgentFormField, type AgentSetting, type ModelTier, type RunResult, type RunSpec, type TokenUsage } from "./types.js"
 
@@ -61,7 +61,10 @@ function summarize(name: string, input: unknown): string {
   const file = fileOf(input)
   if (file) return `${name} ${file}`
   if (!isRecord(input)) return name
-  for (const [key, summary] of SUMMARIES) if (typeof input[key] === "string") return summary(name, input[key] as string)
+  for (const [key, summary] of SUMMARIES) {
+    const value = input[key]
+    if (typeof value === "string") return summary(name, value)
+  }
   return name
 }
 
@@ -77,19 +80,63 @@ function usageOf(u: SDKResultMessage["usage"]): TokenUsage {
   }
 }
 
+/** The kinds of field a form asks for, and a schema's `type` when it is one of them. */
+const FIELD_TYPES: AgentFormField["type"][] = ["string", "number", "integer", "boolean", "array"]
+const fieldType = (v: unknown) => FIELD_TYPES.find((type) => type === v)
+const asText = (v: unknown) => (typeof v === "string" ? v : undefined)
+
+type Choice = { value: string; label: string }
+
+/** A field's choices given as values (`enum`), each with its name beside it (`enumNames`) where it has one. */
+function listedChoices(values: unknown, names?: unknown): Choice[] {
+  if (!Array.isArray(values)) return []
+  const choices: Choice[] = []
+  values.forEach((value: unknown, i) => {
+    if (typeof value !== "string") return
+    const name = Array.isArray(names) ? asText(names[i]) : undefined
+    choices.push({ value, label: name ?? value })
+  })
+  return choices
+}
+
+/** A field's choices given as schemas (`oneOf`, `anyOf`), each a constant with its title. */
+function labelledChoices(options: unknown): Choice[] {
+  if (!Array.isArray(options)) return []
+  const list: unknown[] = options
+  const choices: Choice[] = []
+  for (const option of list) {
+    if (isRecord(option) && typeof option.const === "string") choices.push({ value: option.const, label: asText(option.title) ?? option.const })
+  }
+  return choices
+}
+
 /** A form or page as the card shows it: its fields from the MCP server's schema, or its address. */
 function formOf(req: ElicitationRequest): AgentAsk["form"] | null {
-  if (req.mode === "url") return typeof req.url === "string" && /^https?:\/\//i.test(req.url) ? { message: req.message, url: req.url } : null
-  const schema = req.requestedSchema as { properties?: Record<string, any>; required?: unknown } | undefined
-  const required = new Set(Array.isArray(schema?.required) ? schema.required : [])
-  const text = (v: unknown) => (typeof v === "string" ? v : undefined)
-  const labelled = (list: unknown) => (Array.isArray(list) ? list.flatMap((o) => (typeof o?.const === "string" ? [{ value: o.const, label: text(o.title) ?? o.const }] : [])) : [])
-  const listed = (list: unknown, names?: unknown) => (Array.isArray(list) ? list.flatMap((v, i) => (typeof v === "string" ? [{ value: v, label: (Array.isArray(names) ? text(names[i]) : undefined) ?? v }] : [])) : [])
+  if (req.mode === "url") {
+    if (typeof req.url !== "string" || !/^https?:\/\//i.test(req.url)) return null
+    return { message: req.message, url: req.url }
+  }
+  const schema = req.requestedSchema
+  const properties: unknown = schema?.properties
+  const required = new Set<unknown>(Array.isArray(schema?.required) ? schema.required : [])
   const fields: AgentFormField[] = []
-  for (const [name, p] of Object.entries(schema?.properties ?? {})) {
-    if (!["string", "number", "integer", "boolean", "array"].includes(p?.type)) continue
-    const choices = p.type === "array" ? [...listed(p.items?.enum), ...labelled(p.items?.anyOf)] : [...listed(p.enum, p.enumNames), ...labelled(p.oneOf)]
-    fields.push({ name, title: text(p.title) ?? name, ...(text(p.description) ? { description: p.description } : {}), type: p.type, required: required.has(name), ...(choices.length ? { choices } : {}) })
+  for (const [name, property] of Object.entries(typeof properties === "object" && properties !== null ? properties : {})) {
+    if (!isRecord(property)) continue
+    const type = fieldType(property.type)
+    if (!type) continue
+    const items: Record<string, unknown> = isRecord(property.items) ? property.items : {}
+    const listed = type === "array" ? listedChoices(items.enum) : listedChoices(property.enum, property.enumNames)
+    const labelled = type === "array" ? labelledChoices(items.anyOf) : labelledChoices(property.oneOf)
+    const choices = [...listed, ...labelled]
+    const description = asText(property.description)
+    fields.push({
+      name,
+      title: asText(property.title) ?? name,
+      ...(description ? { description } : {}),
+      type,
+      required: required.has(name),
+      ...(choices.length ? { choices } : {}),
+    })
   }
   return { message: req.message, fields }
 }
@@ -267,7 +314,8 @@ class Report {
   private tool(id: string, name: string, input: unknown, parent: string | null): void {
     if (this.calls.has(id)) return
     this.calls.set(id, { name, file: WRITE_TOOLS.has(name) ? fileOf(input) : undefined })
-    const helper = HELPER_TOOLS.has(name) && isRecord(input) ? String(input.description ?? input.prompt ?? "").trim().slice(0, L.helperChars) : ""
+    // oxlint-disable-next-line typescript/no-base-to-string -- Claude Code gives these as text: String() only guards the rest
+    const helper =HELPER_TOOLS.has(name) && isRecord(input) ? String(input.description ?? input.prompt ?? "").trim().slice(0, L.helperChars) : ""
     this.t.progress({ type: "tool", tool: name, summary: summarize(name, input), call: id, ...(parent ? { parent } : {}), ...(helper ? { helper } : {}) })
   }
 
@@ -301,7 +349,8 @@ class Report {
     const form = { message: fields.map((f) => f.name).join("\n"), fields }
     const answer = await ask({ call, tool: "AskUserQuestion", title: fields[0].name, input, options: [], form }, signal)
     if (!answer || !("accept" in answer) || !answer.accept) return { behavior: "deny", message: answer ? DECLINED : UNANSWERED }
-    const said = (v: unknown) => (Array.isArray(v) ? v.map(String).join(", ") : String(v ?? ""))
+    // oxlint-disable-next-line typescript/no-base-to-string -- MCP's answers are strings, numbers, booleans or lists: never another object
+    const said =(v: unknown) => (Array.isArray(v) ? v.map(String).join(", ") : String(v ?? ""))
     const answers = Object.fromEntries(fields.map((f) => [f.name, said(answer.content?.[f.name])]))
     return { behavior: "allow", updatedInput: { ...input, answers } }
   }

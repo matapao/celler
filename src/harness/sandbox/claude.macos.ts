@@ -1,6 +1,6 @@
 // Claude Code on macOS: what every run of it starts with, in Claude Code's own settings (the keys of its settings.json
 // and its Agent SDK options), so each line can be held against its documentation. Its sandbox here is macOS's own
-// (Seatbelt). Guarantees, each asserted for every system's file by test/harness.test.mjs:
+// (Seatbelt). Guarantees, each asserted for every system's file by test/harness-sandbox.test.mjs:
 // - every command runs in the sandbox, none outside it, and where the sandbox can't start, nothing runs;
 // - commands reach no network at all: everything outside the computer goes through the host's tools (MCP);
 // - they write only in the run's folder (only at work), its own scratch folder inside it, and its shell's own temporary
@@ -18,7 +18,7 @@ import { AGENT_SETTINGS, type Places } from "./places.js"
 const WORK_TOOLS = ["Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "Bash", "TaskStop", "Agent", "ToolSearch", "TodoWrite", "AskUserQuestion"]
 const WRITING_TOOLS = ["Write", "Edit", "NotebookEdit"]
 
-export default function claudeOnMacos(p: Places, purpose: "work" | "read") {
+export function claudeOnMacos(p: Places, purpose: "work" | "read") {
   return {
     tools: purpose === "work" ? WORK_TOOLS : WORK_TOOLS.filter((tool) => !WRITING_TOOLS.includes(tool)),
     sandbox: {

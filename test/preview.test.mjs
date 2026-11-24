@@ -28,7 +28,9 @@ test("preview escapes BiDi spoofing, shows attachment names as they are sent, sa
   const prevDoc = globalThis.document
   globalThis.document = document
   const created = [], revoked = []
+  // oxlint-disable-next-line typescript/unbound-method -- kept only to be put back after the test, never called
   const origCreate = URL.createObjectURL
+  // oxlint-disable-next-line typescript/unbound-method -- kept only to be put back after the test, never called
   const origRevoke = URL.revokeObjectURL
   URL.createObjectURL = () => { const u = "blob:mock/" + created.length; created.push(u); return u }
   URL.revokeObjectURL = u => { revoked.push(u) }
@@ -110,7 +112,8 @@ let urlsMade = 0
 function withDom(t) {
   const { document, root } = mockDom()
   const urls = { created: [], revoked: [] }
-  const saved = { document: globalThis.document, create: URL.createObjectURL, revoke: URL.revokeObjectURL }
+  // oxlint-disable-next-line typescript/unbound-method -- kept only to be put back after the test, never called
+  const saved ={ document: globalThis.document, create: URL.createObjectURL, revoke: URL.revokeObjectURL }
   globalThis.document = document
   URL.createObjectURL = () => { const url = "blob:view/" + urlsMade++; urls.created.push(url); return url }
   URL.revokeObjectURL = url => { urls.revoked.push(url) }

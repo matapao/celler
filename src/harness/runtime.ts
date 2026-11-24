@@ -390,7 +390,8 @@ export class AgentRuntime implements Runtime {
  * A sign-in page's address in what its agent prints: up to the first space, control character (a terminal link's own,
  * as Claude Code wraps it: OSC 8), quote or closing bracket. Until one of those comes, the rest may still be on its way.
  */
-const LOGIN_URL = /https:\/\/[^\s\x00-\x1f\x7f"'`)\]}>]+(?=[\s\x00-\x1f\x7f"'`)\]}>])/
+// oxlint-disable-next-line no-control-regex -- a control character ends the address: this finds them on purpose
+const LOGIN_URL =/https:\/\/[^\s\x00-\x1f\x7f"'`)\]}>]+(?=[\s\x00-\x1f\x7f"'`)\]}>])/
 
 /** An agent's own sign-in: it opens the browser and prints the page's address; a code the page shows goes to its input. */
 function startLogin(program: string, args: string[], env: NodeJS.ProcessEnv): AgentLogin {
