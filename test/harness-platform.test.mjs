@@ -10,7 +10,7 @@ import {
   claudeWords,
   codexHome,
   codexWords,
-  desk,
+  oneCell,
   fakeClaude,
   fakeCodex,
   github,
@@ -34,13 +34,13 @@ test("a run of the published graph reaches its cell's tools through the harness,
     const ran = async (profile, agent, log) => {
       const runs = new Set();
       const runtime = (run) => (run.profile === profile ? new AgentRuntime(agent, host) : undefined);
-      const { platform, app } = desk(runtime, { progress: (run) => runs.add(run.id) }, new Map([['echo', echo]]));
+      const { platform, app } = oneCell(runtime, { progress: (run) => runs.add(run.id) }, new Map([['echo', echo]]));
       const revision = app.publish([
-        { kind: 'cell', id: 'desk', title: 'Desk', profile, context: ['Be brief.'], exports: ['echo'] },
+        { kind: 'cell', id: 'main', title: 'Main', profile, context: ['Be brief.'], exports: ['echo'] },
         { kind: 'tool', id: 'echo', ...echoTool },
       ]);
       try {
-        const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Use echo' });
+        const result = await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'Use echo' });
         assert.equal(result.isError, false, JSON.stringify(result));
         assert.match(result.content[0].text, /echo: hi$/);
         assert.equal(result.structuredContent.ok, true);
@@ -48,7 +48,7 @@ test("a run of the published graph reaches its cell's tools through the harness,
         const [run] = runs;
         assert.deepEqual(
           app
-            .history('office', run)
+            .history('alice', run)
             .filter((e) => e.kind === 'call')
             .map((e) => e.detail.id),
           ['echo'],
@@ -64,9 +64,9 @@ test("a run of the published graph reaches its cell's tools through the harness,
       await ran('claude', fakeClaude({ FAKE_CLAUDE_LOG: claudeLog, FAKE_CLAUDE_TOOL: 'echo' }), claudeLog)
     ).find((e) => e.what === 'initialize').data;
     assert.equal(initialize.appendSystemPrompt, 'Be brief.');
-    assert.match(initialize.mcpServers.office.headers.Authorization, /^Bearer \S+$/);
+    assert.match(initialize.mcpServers.tools.headers.Authorization, /^Bearer \S+$/);
     // A call to it may wait for the person as long as celler lets it, not as long as the agent would on its own.
-    assert.equal(initialize.mcpServers.office.timeout, harnessLimits.mcpCallMs);
+    assert.equal(initialize.mcpServers.tools.timeout, harnessLimits.mcpCallMs);
     // Codex: the same, its token in a variable of its own.
     const codexLog = path.join(dir, 'codex.jsonl');
     const exec = (
@@ -76,7 +76,7 @@ test("a run of the published graph reaches its cell's tools through the harness,
     assert.match(exec.values.CELLER_VALUE_0, /^Bearer \S+$/);
     assert.match(
       exec.configs.find((c) => c.startsWith('mcp_servers=')),
-      new RegExp(`^mcp_servers=\\{ office = \\{ .*, tool_timeout_sec = ${harnessLimits.mcpCallMs / 1000} \\} \\}$`),
+      new RegExp(`^mcp_servers=\\{ tools = \\{ .*, tool_timeout_sec = ${harnessLimits.mcpCallMs / 1000} \\} \\}$`),
     );
   }));
 
@@ -85,30 +85,30 @@ test("a call to one of the run's MCP tools is reported with its server and tool,
     const reported = async (agent) => {
       const tools = [];
       const progress = (_run, p) => p.type === 'tool' && tools.push(p);
-      const { platform, app } = desk(() => new AgentRuntime(agent, host), { progress }, new Map([['echo', echo]]));
+      const { platform, app } = oneCell(() => new AgentRuntime(agent, host), { progress }, new Map([['echo', echo]]));
       const revision = app.publish([
-        { kind: 'cell', id: 'desk', title: 'Desk', profile: 'any', exports: ['echo'] },
+        { kind: 'cell', id: 'main', title: 'Main', profile: 'any', exports: ['echo'] },
         { kind: 'tool', id: 'echo', ...echoTool },
       ]);
       try {
-        const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Use echo' });
+        const result = await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'Use echo' });
         assert.equal(result.isError, false, JSON.stringify(result));
         return tools.map((p) => ({ tool: p.tool, ...('mcp' in p ? { mcp: p.mcp } : {}) }));
       } finally {
         await platform.close();
       }
     };
-    const echoed = { server: 'office', tool: 'echo' };
+    const echoed = { server: 'tools', tool: 'echo' };
     // Claude Code's name for it keeps its own form; the server and tool are apart beside it.
     const claude = fakeClaude({ FAKE_CLAUDE_LOG: path.join(dir, 'claude.jsonl'), FAKE_CLAUDE_TOOL: 'echo' });
     assert.deepEqual(await reported(claude), [
-      { tool: 'mcp__office__echo', mcp: echoed },
+      { tool: 'mcp__tools__echo', mcp: echoed },
       { tool: 'Grep' },
       { tool: 'Bash' },
     ]);
     const codex = fakeCodex(codexHome, { FAKE_CODEX_LOG: path.join(dir, 'codex.jsonl'), FAKE_CODEX_TOOL: 'echo' });
     assert.deepEqual(await reported(codex), [
-      { tool: 'office.echo', mcp: echoed },
+      { tool: 'tools.echo', mcp: echoed },
       { tool: 'execute' },
       { tool: 'edit' },
     ]);
@@ -125,7 +125,7 @@ test("an agent that searches its tools itself is given them all, and any other g
             host,
           ),
         allowed: () => true,
-        server: 'office',
+        server: 'tools',
         spec: () => ({ prompt: 'x', model: '', sessionId: '', resume: false, timeoutMs: 20_000 }),
       });
       // No listing fits in no bytes: a run without its own search gets the menu.
@@ -136,12 +136,12 @@ test("an agent that searches its tools itself is given them all, and any other g
         discoveryBytes: 0,
       });
       const revision = app.publish([
-        { kind: 'cell', id: 'desk', title: 'Desk', profile: 'fake', exports: ['echo', 'notes'], pins: ['echo'] },
+        { kind: 'cell', id: 'main', title: 'Main', profile: 'fake', exports: ['echo', 'notes'], pins: ['echo'] },
         { kind: 'tool', id: 'echo', ...echoTool },
         { kind: 'tool', id: 'notes', ...echoTool },
       ]);
       try {
-        const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'x' });
+        const result = await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'x' });
         assert.equal(result.isError, false, JSON.stringify(result));
         return sentTo(log).find((e) => e.what === 'tools/list').data;
       } finally {
@@ -171,11 +171,11 @@ test("a model-only decision gets no MCP server, not even the run's own", () =>
       purpose: 'inference',
       mcpServers: [github],
     });
-    const { platform, app, revision } = desk(() => new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log }), host), {
+    const { platform, app, revision } = oneCell(() => new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log }), host), {
       spec: decision,
     });
     try {
-      const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'x' });
+      const result = await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'x' });
       assert.equal(result.isError, false, JSON.stringify(result));
       assert.equal(sentTo(log).find((e) => e.what === 'initialize').data.mcpServers, undefined);
     } finally {
@@ -193,13 +193,13 @@ test("a delegated run that fails tells the agent that called it so in celler's w
         throw new Error('ENOENT: /Users/someone/host/data.db');
       },
     };
-    const { platform, app, ended } = desk((run) =>
-      run.profile === 'desk'
+    const { platform, app, ended } = oneCell((run) =>
+      run.profile === 'main'
         ? new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_TOOL: 'helper' }), host)
         : broken,
     );
     const revision = app.publish([
-      { kind: 'cell', id: 'desk', title: 'Desk', profile: 'desk', exports: ['helper'] },
+      { kind: 'cell', id: 'main', title: 'Main', profile: 'main', exports: ['helper'] },
       {
         kind: 'tool',
         id: 'helper',
@@ -210,9 +210,9 @@ test("a delegated run that fails tells the agent that called it so in celler's w
     ]);
     try {
       const result = await app.start({
-        owner: 'office',
+        owner: 'alice',
         revision,
-        entry: 'desk',
+        entry: 'main',
         workspace: dir,
         input: 'Ask the helper',
       });
@@ -237,7 +237,7 @@ test("a platform whose MCP server couldn't open tries again for the next run", (
       );
       return this;
     };
-    const { platform, app } = desk(
+    const { platform, app } = oneCell(
       () =>
         new AgentRuntime(
           fakeClaude({ FAKE_CLAUDE_LOG: path.join(dir, 'agent.jsonl'), FAKE_CLAUDE_TOOL: 'echo' }),
@@ -247,10 +247,10 @@ test("a platform whose MCP server couldn't open tries again for the next run", (
       new Map([['echo', echo]]),
     );
     const revision = app.publish([
-      { kind: 'cell', id: 'desk', title: 'Desk', profile: 'fake', exports: ['echo'] },
+      { kind: 'cell', id: 'main', title: 'Main', profile: 'fake', exports: ['echo'] },
       { kind: 'tool', id: 'echo', ...echoTool },
     ]);
-    const start = () => app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Use echo' });
+    const start = () => app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'Use echo' });
     try {
       await assert.rejects(start(), /EADDRNOTAVAIL/);
       assert.match((await start()).content[0].text, /echo: hi$/);
@@ -263,13 +263,13 @@ test("a platform whose MCP server couldn't open tries again for the next run", (
 test("a cell's context reaches its agent as text, a resource's text too, and context with no text fails the run in celler's words", () =>
   inFolder(async (dir) => {
     const log = path.join(dir, 'agent.jsonl');
-    const { platform, app } = desk(() => new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log }), host));
-    const deskWith = (context) =>
-      app.publish([{ kind: 'cell', id: 'desk', title: 'Desk', profile: 'any', exports: [], context }]);
-    const start = (revision) => app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Go' });
+    const { platform, app } = oneCell(() => new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log }), host));
+    const mainWith = (context) =>
+      app.publish([{ kind: 'cell', id: 'main', title: 'Main', profile: 'any', exports: [], context }]);
+    const start = (revision) => app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'Go' });
     try {
       await start(
-        deskWith([
+        mainWith([
           'Be brief.',
           { type: 'resource', resource: { uri: 'policy://mail', text: 'Never email customers.' } },
         ]),
@@ -278,7 +278,7 @@ test("a cell's context reaches its agent as text, a resource's text too, and con
         sentTo(log).find((e) => e.what === 'initialize').data.appendSystemPrompt,
         'Be brief.\n\nNever email customers.',
       );
-      const image = await start(deskWith([{ type: 'image', data: 'AAAA', mimeType: 'image/png' }]));
+      const image = await start(mainWith([{ type: 'image', data: 'AAAA', mimeType: 'image/png' }]));
       assert.deepEqual(
         [image.isError, image.content[0].text],
         [true, "A cell's context can't hold image content for an agent run by the harness: only text"],

@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AgentRuntime, harnessPlatform, SimulatedRuntime } from '@matapao/celler/harness';
-import { desk, fakeClaude, host, inFolder, sentTo } from './support-harness.mjs';
+import { oneCell, fakeClaude, host, inFolder, sentTo } from './support-harness.mjs';
 
 // Runs stopped, and the platform closed: a run cancelled before its agent starts, or stopped through celler, and the
 // platform closing on runs still going, on its MCP server as it opens, and settling once what its runs left is gone.
@@ -25,10 +25,10 @@ test('cancellation while the host prepares a run prevents the agent from startin
       controller.abort();
       return { prompt: 'x', model: '', sessionId: '', resume: false, timeoutMs: 20_000 };
     };
-    const { platform, app, revision } = desk(runtime, { spec: preparing });
+    const { platform, app, revision } = oneCell(runtime, { spec: preparing });
     try {
       await assert.rejects(
-        app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'x' }, controller.signal),
+        app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'x' }, controller.signal),
         { name: 'AbortError' },
       );
       assert.equal(started, false);
@@ -41,16 +41,16 @@ test('closing the platform stops the agents still going: their runs end failed, 
   inFolder(async (dir) => {
     let id;
     // Closed once its agent is going.
-    const d = desk(() => new SimulatedRuntime(), {
+    const d = oneCell(() => new SimulatedRuntime(), {
       started: (run) => {
         id = run.id;
         void d.platform.close();
       },
     });
     const result = await d.app.start({
-      owner: 'office',
+      owner: 'alice',
       revision: d.revision,
-      entry: 'desk',
+      entry: 'main',
       workspace: dir,
       input: 'Wait',
     });
@@ -60,7 +60,7 @@ test('closing the platform stops the agents still going: their runs end failed, 
       d.ended.map((r) => r.cancelled),
       [true],
     );
-    assert.equal(d.app.history('office', id).find((e) => e.kind === 'ended')?.detail.status, 'failed');
+    assert.equal(d.app.history('alice', id).find((e) => e.kind === 'ended')?.detail.status, 'failed');
   }));
 
 test('a platform closed while its MCP server opens starts no agent, and once closed it starts none again, nor opens its server', () =>
@@ -86,10 +86,10 @@ test('a platform closed while its MCP server opens starts no agent, and once clo
     const platform = harnessPlatform({
       runtime: () => runtime,
       allowed: () => true,
-      server: 'office',
+      server: 'tools',
       spec: () => ({ prompt: 'x', model: '', sessionId: '', resume: false, timeoutMs: 20_000 }),
     });
-    const run = { id: 'r1', owner: 'office', workspace: dir, context: [], profile: 'any', input: 'x' };
+    const run = { id: 'r1', owner: 'alice', workspace: dir, context: [], profile: 'any', input: 'x' };
     try {
       // Closed while its server opens, before the run's agent starts.
       const launching = platform.launch(run, async () => undefined, new AbortController().signal);
@@ -114,10 +114,10 @@ test('a run stopped through celler keeps no result there, and the host still hea
   inFolder(async (dir) => {
     const stop = new AbortController();
     // Stopped once its agent is going.
-    const { platform, app, revision, ended } = desk(() => new SimulatedRuntime(), { started: () => stop.abort() });
+    const { platform, app, revision, ended } = oneCell(() => new SimulatedRuntime(), { started: () => stop.abort() });
     try {
       await assert.rejects(
-        app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Wait' }, stop.signal),
+        app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'Wait' }, stop.signal),
       );
       assert.deepEqual(
         ended.map((r) => r.cancelled),
@@ -134,10 +134,10 @@ test('closing the platform settles once what its runs left is gone: their scratc
     // A run whose agent waits for the person, who never answers, when the platform closes.
     let asked;
     const asking = new Promise((resolve) => (asked = resolve));
-    const { platform, app, revision } = desk(() => new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log }), host), {
+    const { platform, app, revision } = oneCell(() => new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log }), host), {
       ask: () => (asked(), new Promise(() => undefined)),
     });
-    const started = app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Go' });
+    const started = app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'Go' });
     await asking;
     const { allowRead } = sentTo(log).find((e) => e.what === 'started').data.settings.sandbox.filesystem;
     const short = allowRead[1];

@@ -8,7 +8,7 @@ import { createApp } from '@matapao/celler';
 import { claudeAgent, codexAgent, harnessPlatform } from '@matapao/celler/harness';
 
 // What the harness tests share: the host and its words, the agents with their programs the stand-ins, a run as the
-// runtime takes it, its places, a folder for a test, and a host office of one cell run by the harness platform.
+// runtime takes it, its places, a folder for a test, and a host's graph of one cell run by the harness platform.
 
 export const host = { client: { name: 'host', version: '1.0.0' }, mark: (env) => ({ ...env, HOST_RUN: '1' }) };
 export const claudeWords = { noClaude: "Claude Code isn't here.", login: 'Sign in to Claude in the host.' };
@@ -84,20 +84,20 @@ export const codexHome = mkdtempSync(path.join(os.tmpdir(), 'celler-codex-home-'
 after(() => rmSync(codexHome, { recursive: true, force: true }));
 
 /**
- * A host's office of one cell, `desk`, run by `runtime`, with more of the platform's options and the host's adapters if
+ * A host's graph of one cell, `main`, run by `runtime`, with more of the platform's options and the host's adapters if
  * given: its platform, app and revision, and what each run ended with.
  */
-export function desk(runtime, more = {}, adapters = new Map()) {
+export function oneCell(runtime, more = {}, adapters = new Map()) {
   const ended = [];
   const platform = harnessPlatform({
     runtime,
     allowed: () => true,
-    server: 'office',
+    server: 'tools',
     spec: (run) => ({ prompt: String(run.input), model: '', sessionId: '', resume: false, timeoutMs: 20_000 }),
     ended: (_run, result) => ended.push(result),
     ...more,
   });
   const app = createApp({ database: new DatabaseSync(':memory:'), platform, adapters });
-  const revision = app.publish([{ kind: 'cell', id: 'desk', title: 'Desk', profile: 'any', exports: [] }]);
+  const revision = app.publish([{ kind: 'cell', id: 'main', title: 'Main', profile: 'any', exports: [] }]);
   return { platform, app, revision, ended };
 }

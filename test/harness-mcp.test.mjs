@@ -6,7 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { CallToolResultSchema, CreateTaskResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { callThenClose, until } from './support.mjs';
-import { desk, inFolder } from './support-harness.mjs';
+import { oneCell, inFolder } from './support-harness.mjs';
 
 /** The status line a server answers a raw HTTP request with, or "" when it says nothing within 2 s. */
 const statusOf = (url, request) =>
@@ -48,9 +48,9 @@ test("an agent's MCP session lasts from one request to the next: a call it makes
       }),
     };
     const quick = { call: async () => ({ content: [{ type: 'text', text: 'quick' }] }) };
-    const { platform, app } = desk(() => tasked, {}, new Map([['quick', quick]]));
+    const { platform, app } = oneCell(() => tasked, {}, new Map([['quick', quick]]));
     const revision = app.publish([
-      { kind: 'cell', id: 'desk', title: 'Desk', profile: 'tasked', exports: ['slow'] },
+      { kind: 'cell', id: 'main', title: 'Main', profile: 'tasked', exports: ['slow'] },
       {
         kind: 'tool',
         id: 'slow',
@@ -59,7 +59,7 @@ test("an agent's MCP session lasts from one request to the next: a call it makes
       },
     ]);
     try {
-      const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'x' });
+      const result = await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'x' });
       assert.deepEqual([result.isError, result.content[0].text], [false, 'quick']);
     } finally {
       await platform.close();
@@ -93,9 +93,9 @@ test("a call with arguments as large as celler takes inline reaches its tool thr
     const measure = {
       call: async (_run, args) => ({ content: [{ type: 'text', text: `${args.text.length} characters` }] }),
     };
-    const { platform, app } = desk(() => calling, {}, new Map([['measure', measure]]));
+    const { platform, app } = oneCell(() => calling, {}, new Map([['measure', measure]]));
     const revision = app.publish([
-      { kind: 'cell', id: 'desk', title: 'Desk', profile: 'calling', exports: ['long'] },
+      { kind: 'cell', id: 'main', title: 'Main', profile: 'calling', exports: ['long'] },
       {
         kind: 'tool',
         id: 'long',
@@ -104,7 +104,7 @@ test("a call with arguments as large as celler takes inline reaches its tool thr
       },
     ]);
     try {
-      const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'x' });
+      const result = await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'x' });
       assert.deepEqual([result.isError, result.content[0].text], [false, `${text.length} characters`]);
     } finally {
       await platform.close();
@@ -139,9 +139,9 @@ test("a call still going when its run ends hears that it was cut off: the run's 
           signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
         ),
     };
-    const { platform, app } = desk(() => leaving, {}, new Map([['wait', wait]]));
+    const { platform, app } = oneCell(() => leaving, {}, new Map([['wait', wait]]));
     const revision = app.publish([
-      { kind: 'cell', id: 'desk', title: 'Desk', profile: 'leaving', exports: ['wait'] },
+      { kind: 'cell', id: 'main', title: 'Main', profile: 'leaving', exports: ['wait'] },
       {
         kind: 'tool',
         id: 'wait',
@@ -151,7 +151,7 @@ test("a call still going when its run ends hears that it was cut off: the run's 
     ]);
     try {
       assert.equal(
-        (await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'x' })).content[0].text,
+        (await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'x' })).content[0].text,
         'Done',
       );
       // In celler's words, as a result it can read, never the abort its adapter rejected with.
@@ -183,9 +183,9 @@ test("a request to the run's MCP server at an address that can't be read is answ
     const unhandled = [];
     const onUnhandled = (reason) => unhandled.push(reason);
     process.on('unhandledRejection', onUnhandled);
-    const { platform, app, revision } = desk(() => waiting);
+    const { platform, app, revision } = oneCell(() => waiting);
     try {
-      const started = app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'x' });
+      const started = app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'x' });
       await until(() => server);
       // With the run's own token, at an address no URL can be read from.
       const request = [
@@ -220,11 +220,9 @@ test("a run's MCP server answers only a run's own token, at its one address, and
         { cancel: () => undefined, done: new Promise((resolve) => finish.push(resolve)) }
       ),
     };
-    const { platform, app, revision } = desk(() => waiting);
+    const { platform, app, revision } = oneCell(() => waiting);
     try {
-      const runs = [0, 1].map(() =>
-        app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'x' }),
-      );
+      const runs = [0, 1].map(() => app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'x' }));
       await until(() => servers.length === 2);
       const [one, other] = servers;
       const initialize = {

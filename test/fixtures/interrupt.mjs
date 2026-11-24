@@ -13,7 +13,7 @@ const app = createApp({
       {
         prepare: async (_run, content) => ({
           account: 'test',
-          destination: 'outbox',
+          destination: 'out',
           operation: 'send',
           files: [],
           content,

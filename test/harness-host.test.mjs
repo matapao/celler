@@ -17,7 +17,7 @@ import {
   claudeWords,
   codexHome,
   codexWords,
-  desk,
+  oneCell,
   fakeClaude,
   fakeClaudeProgram,
   host,
@@ -32,12 +32,12 @@ test("what an agent asks before it acts reaches the host with the run it asks in
   inFolder(async (dir) => {
     const asked = [];
     const reply = async (ask) => {
-      const { platform, app, revision } = desk(
+      const { platform, app, revision } = oneCell(
         () => new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: path.join(dir, 'agent.jsonl') }), host),
         ask ? { ask } : {},
       );
       try {
-        const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Test it' });
+        const result = await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'Test it' });
         assert.equal(result.isError, false, JSON.stringify(result));
         return result.content[0].text;
       } finally {
@@ -49,7 +49,7 @@ test("what an agent asks before it acts reaches the host with the run it asks in
       await reply(async (run, q) => (asked.push([run.entry, q.title, q.tool]), { option: 'allow' })),
       /Ran them\.$/,
     );
-    assert.deepEqual(asked, [['desk', 'Run the tests', 'Bash']]);
+    assert.deepEqual(asked, [['main', 'Run the tests', 'Bash']]);
     // A host that asks no one: what the agent asks about doesn't happen.
     assert.match(await reply(undefined), /Didn't run them\.$/);
   }));
@@ -83,8 +83,8 @@ test("each of a host's hooks is called on the object the host gave it on, so a h
         return null;
       },
     };
-    const office = {
-      server: 'office',
+    const hooks = {
+      server: 'tools',
       answer: { option: 'allow' },
       runtime() {
         calledOn.set('runtime', this);
@@ -112,11 +112,11 @@ test("each of a host's hooks is called on the object the host gave it on, so a h
         calledOn.set('ended', this);
       },
     };
-    const platform = harnessPlatform(office);
+    const platform = harnessPlatform(hooks);
     const app = createApp({ database: new DatabaseSync(':memory:'), platform, adapters: new Map() });
-    const revision = app.publish([{ kind: 'cell', id: 'desk', title: 'Desk', profile: 'any', exports: [] }]);
+    const revision = app.publish([{ kind: 'cell', id: 'main', title: 'Main', profile: 'any', exports: [] }]);
     try {
-      const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Test it' });
+      const result = await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'Test it' });
       // The host's answer, which its ask read from it, reached the agent.
       assert.match(result.content[0].text, /Ran them\.$/);
       await new AgentRuntime(codexAgent(codexFinder), marker).health(false);
@@ -124,13 +124,13 @@ test("each of a host's hooks is called on the object the host gave it on, so a h
       await platform.close();
     }
     const givenOn = {
-      runtime: office,
-      allowed: office,
-      spec: office,
-      started: office,
-      progress: office,
-      ask: office,
-      ended: office,
+      runtime: hooks,
+      allowed: hooks,
+      spec: hooks,
+      started: hooks,
+      progress: hooks,
+      ask: hooks,
+      ended: hooks,
       mark: marker,
       claude: claudeFinder,
       codex: codexFinder,
@@ -141,7 +141,7 @@ test("each of a host's hooks is called on the object the host gave it on, so a h
 
 test("an agent that can't start ends as a failed run, which the host hears", () =>
   inFolder(async (dir) => {
-    const { platform, app, revision, ended } = desk(() => ({
+    const { platform, app, revision, ended } = oneCell(() => ({
       kind: 'broken',
       health: async () => ({ ok: false, checkedAt: 0, detail: '' }),
       run: () => {
@@ -149,7 +149,7 @@ test("an agent that can't start ends as a failed run, which the host hears", () 
       },
     }));
     try {
-      const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Go' });
+      const result = await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'Go' });
       assert.deepEqual([result.isError, result.content[0].text], [true, 'could not start']);
       assert.deepEqual(
         ended.map((r) => [r.ok, r.error]),
@@ -169,14 +169,14 @@ test("a host whose hook throws as the agent starts doesn't leave the agent worki
       health: () => simulated.health(),
       run: (s, p) => (handle = simulated.run(s, p)),
     };
-    const { platform, app, revision } = desk(() => runtime, {
+    const { platform, app, revision } = oneCell(() => runtime, {
       started: () => {
         throw new Error('The window is gone');
       },
     });
     try {
       await assert.rejects(
-        app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Go' }),
+        app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'Go' }),
         /The window is gone/,
       );
       assert.equal((await handle.done).cancelled, true);
@@ -201,12 +201,12 @@ test(
           FAKE_CLAUDE_LOG: path.join(dir, 'agent.jsonl'),
         }),
       };
-      const { platform, app, revision } = desk(() => new AgentRuntime(agent, host), {
+      const { platform, app, revision } = oneCell(() => new AgentRuntime(agent, host), {
         started: (_run, pid) => pids.push(pid),
         ask: async () => ({ option: 'allow' }),
       });
       try {
-        const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Go' });
+        const result = await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'Go' });
         assert.equal(result.isError, false, JSON.stringify(result));
         assert.equal(pids.length, 1);
         assert.equal(typeof pids[0], 'number');

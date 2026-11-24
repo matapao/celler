@@ -75,12 +75,12 @@ test("adapters are the host's own map, read live: one added after createApp serv
     launch: (_spec, connect) => withClient(connect, (client) => client.callTool({ name: 'late', arguments: {} })),
   };
   const app = createApp({ database, adapters, platform });
-  const graph = [cell('desk', ['late']), tool('late', { adapter: 'later' })];
+  const graph = [cell('main', ['late']), tool('late', { adapter: 'later' })];
   assert.throws(() => app.publish(graph), /Unknown adapter/);
   adapters.set('later', { call: async () => text('here now') });
   const revision = app.publish(graph);
   assert.deepEqual(
-    await app.start({ owner: 'o', revision, entry: 'desk', workspace: '/w', input: null }),
+    await app.start({ owner: 'o', revision, entry: 'main', workspace: '/w', input: null }),
     text('here now'),
   );
 });

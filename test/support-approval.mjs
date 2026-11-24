@@ -6,7 +6,7 @@ import { cell, object, tool } from './support.mjs';
 
 export const packet = (value) => ({
   account: 'test',
-  destination: 'outbox',
+  destination: 'out',
   operation: 'deliver',
   content: { message: value },
   files: [{ name: 'data.txt', mediaType: 'text/plain', base64: Buffer.from(value).toString('base64') }],

@@ -10,7 +10,7 @@ import { claudeOnMacos } from '../dist/harness/sandbox/claude.macos.js';
 import { until } from './support.mjs';
 import {
   codexHome,
-  desk,
+  oneCell,
   fakeClaude,
   fakeCodex,
   github,
@@ -74,15 +74,15 @@ test("each of a run's MCP servers has a name of its own, which its agent names i
       timeoutMs: 20_000,
       mcpServers,
     });
-    const { platform, app, revision, ended } = desk(
+    const { platform, app, revision, ended } = oneCell(
       () => new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log }), host),
-      { spec: named([{ ...github, name: 'office' }]) },
+      { spec: named([{ ...github, name: 'tools' }]) },
     );
     try {
-      const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'x' });
+      const result = await app.start({ owner: 'alice', revision, entry: 'main', workspace: dir, input: 'x' });
       assert.deepEqual(
         [result.isError, ended.map((r) => r.error)],
-        [true, ["Two of the run's MCP servers are named office: each needs a name of its own"]],
+        [true, ["Two of the run's MCP servers are named tools: each needs a name of its own"]],
       );
     } finally {
       await platform.close();

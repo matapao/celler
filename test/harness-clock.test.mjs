@@ -8,7 +8,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { AgentRuntime } from '@matapao/celler/harness';
 import { harnessLimits } from '../dist/limits.js';
 import { until } from './support.mjs';
-import { desk, fakeClaude, host, inFolder, spec } from './support-harness.mjs';
+import { oneCell, fakeClaude, host, inFolder, spec } from './support-harness.mjs';
 
 test("a run's clock stands still while the person is asked, and a file in its scratch isn't one it changed", () =>
   inFolder(async (dir) => {
@@ -83,10 +83,10 @@ test("a run whose agent is gone while the person is asked ends there: its clock 
   }));
 
 /** An adapter whose calls wait for the person in the inbox, and send what the person approved. */
-const outbox = {
+const sender = {
   prepare: async (_run, args) => ({
-    account: 'office',
-    destination: 'outbox',
+    account: 'alice',
+    destination: 'out',
     operation: 'send',
     content: { text: args.text },
     files: [],
@@ -94,12 +94,12 @@ const outbox = {
   send: async (_run, write) => ({ content: [{ type: 'text', text: `sent: ${write.content.text}` }] }),
 };
 const textInput = { type: 'object', properties: { text: { type: 'string' } } };
-/** A host's office: its desk sends through the outbox, or asks its clerk, who does. */
-const office = [
-  { kind: 'cell', id: 'desk', title: 'Desk', profile: 'desk', exports: ['send', 'ask_clerk'] },
-  { kind: 'tool', id: 'send', target: { adapter: 'outbox' }, definition: { inputSchema: textInput } },
-  { kind: 'tool', id: 'ask_clerk', target: { cell: 'clerk' }, definition: { inputSchema: textInput } },
-  { kind: 'cell', id: 'clerk', title: 'Clerk', profile: 'clerk', exports: ['send'] },
+/** A host's graph: its main cell sends through the sender, or asks its assistant, who does. */
+const graph = [
+  { kind: 'cell', id: 'main', title: 'Main', profile: 'main', exports: ['send', 'ask_assistant'] },
+  { kind: 'tool', id: 'send', target: { adapter: 'sender' }, definition: { inputSchema: textInput } },
+  { kind: 'tool', id: 'ask_assistant', target: { cell: 'assistant' }, definition: { inputSchema: textInput } },
+  { kind: 'cell', id: 'assistant', title: 'Assistant', profile: 'assistant', exports: ['send'] },
 ];
 /** The host's run of what it was started with, which may take `timeoutMs`. */
 const within = (timeoutMs) => (run) => ({
@@ -109,10 +109,10 @@ const within = (timeoutMs) => (run) => ({
   resume: false,
   timeoutMs,
 });
-/** The call waiting for the person in the office's inbox, once one is. */
+/** The call waiting for the person in the owner's inbox, once one is. */
 async function pendingIn(app) {
-  await until(() => app.human.inbox('office').some((item) => item.state === 'pending'));
-  return app.human.inbox('office').find((item) => item.state === 'pending');
+  await until(() => app.human.inbox('alice').some((item) => item.state === 'pending'));
+  return app.human.inbox('alice').find((item) => item.state === 'pending');
 }
 /**
  * An agent that works in this process, as the runtime runs one: `work` calls the run's tools (with the MCP client's own
@@ -154,23 +154,23 @@ const working = (work) => ({
 test("a run's clock stands still while one of its calls waits for the person in the inbox: approved after longer than the run may take, it ends as its agent did", () =>
   inFolder(async (dir) => {
     const fake = fakeClaude({ FAKE_CLAUDE_LOG: path.join(dir, 'agent.jsonl'), FAKE_CLAUDE_TOOL: 'send' });
-    const { platform, app } = desk(
+    const { platform, app } = oneCell(
       () => new AgentRuntime(fake, host),
       { spec: within(1_000) },
-      new Map([['outbox', outbox]]),
+      new Map([['sender', sender]]),
     );
     try {
       const started = app.start({
-        owner: 'office',
-        revision: app.publish(office),
-        entry: 'desk',
+        owner: 'alice',
+        revision: app.publish(graph),
+        entry: 'main',
         workspace: dir,
         input: 'Send it',
       });
       const { id } = await pendingIn(app);
       // The person takes longer than the whole run may.
       await delay(1_500);
-      await app.human.approve('office', id);
+      await app.human.approve('alice', id);
       const result = await started;
       assert.equal(result.isError, false, result.structuredContent?.error);
       assert.match(result.content[0].text, /sent: hi$/);
@@ -188,22 +188,22 @@ test("a run's clock goes on once the person has decided: a run that works on pas
       await spend(600);
       return 'Done';
     });
-    const { platform, app } = desk(
+    const { platform, app } = oneCell(
       () => new AgentRuntime(agent, host),
       { spec: within(300) },
-      new Map([['outbox', outbox]]),
+      new Map([['sender', sender]]),
     );
     try {
       const started = app.start({
-        owner: 'office',
-        revision: app.publish(office),
-        entry: 'desk',
+        owner: 'alice',
+        revision: app.publish(graph),
+        entry: 'main',
         workspace: dir,
         input: 'Send it',
       });
       const { id } = await pendingIn(app);
       await delay(450);
-      await app.human.approve('office', id);
+      await app.human.approve('alice', id);
       const result = await started;
       // It timed out, and only once its call had come back with what was sent.
       assert.deepEqual(
@@ -226,22 +226,22 @@ test("an ask and a call in the inbox at the same time stop a run's clock once: i
     });
     // The ask is answered first, after twice the run's time; the call long after it, alone longer than the run may take.
     const answer = async () => (await delay(400), { option: 'allow' });
-    const { platform, app } = desk(
+    const { platform, app } = oneCell(
       () => new AgentRuntime(agent, host),
       { spec: within(200), ask: answer },
-      new Map([['outbox', outbox]]),
+      new Map([['sender', sender]]),
     );
     try {
       const started = app.start({
-        owner: 'office',
-        revision: app.publish(office),
-        entry: 'desk',
+        owner: 'alice',
+        revision: app.publish(graph),
+        entry: 'main',
         workspace: dir,
         input: 'Send it',
       });
       const { id } = await pendingIn(app);
       await delay(800);
-      await app.human.approve('office', id);
+      await app.human.approve('alice', id);
       const result = await started;
       // Both came back, and then it had the time it had left as they began, not that and the ask's time again.
       assert.deepEqual(
@@ -255,26 +255,26 @@ test("an ask and a call in the inbox at the same time stop a run's clock once: i
 
 test("a run waits for the person while a run it delegated does: its clock stands still while that run's call waits in the inbox, and while its agent asks", () =>
   inFolder(async (dir) => {
-    // The desk asks its clerk, whose call waits in the inbox and who then asks the person, each longer than either run may take.
-    const deskAgent = working(({ call }) => call('ask_clerk'));
-    const clerk = working(async ({ call, ask }) => `${await call('send')}, ${await ask()}`);
+    // The main cell asks its assistant, whose call waits in the inbox and who then asks the person, each longer than either run may take.
+    const mainAgent = working(({ call }) => call('ask_assistant'));
+    const assistant = working(async ({ call, ask }) => `${await call('send')}, ${await ask()}`);
     const answer = async () => (await delay(450), { option: 'allow' });
-    const { platform, app, ended } = desk(
-      (run) => new AgentRuntime(run.parent ? clerk : deskAgent, host),
+    const { platform, app, ended } = oneCell(
+      (run) => new AgentRuntime(run.parent ? assistant : mainAgent, host),
       { spec: within(300), ask: answer },
-      new Map([['outbox', outbox]]),
+      new Map([['sender', sender]]),
     );
     try {
       const started = app.start({
-        owner: 'office',
-        revision: app.publish(office),
-        entry: 'desk',
+        owner: 'alice',
+        revision: app.publish(graph),
+        entry: 'main',
         workspace: dir,
-        input: 'Ask the clerk',
+        input: 'Ask the assistant',
       });
       const { id } = await pendingIn(app);
       await delay(450);
-      await app.human.approve('office', id);
+      await app.human.approve('alice', id);
       const result = await started;
       assert.deepEqual([result.isError, result.content[0].text], [false, 'sent: hi, allow']);
       assert.deepEqual(
@@ -289,31 +289,31 @@ test("a run waits for the person while a run it delegated does: its clock stands
 test("a delegated run's ask stops its caller's clock only until the ask is taken back: once that run has ended, the caller's clock goes on, though the host never answers", () =>
   inFolder(async (dir) => {
     const heard = [];
-    // The desk asks its clerk, then works on for longer than it has; the clerk asks the person, and ends before an answer.
-    const deskAgent = working(async ({ call, spend }) => {
-      heard.push(await call('ask_clerk'));
+    // The main cell asks its assistant, then works on for longer than it has; the assistant asks the person, and ends before an answer.
+    const mainAgent = working(async ({ call, spend }) => {
+      heard.push(await call('ask_assistant'));
       await spend(600);
       return 'Done';
     });
-    const clerk = working(async ({ ask, spend }) => {
+    const assistant = working(async ({ ask, spend }) => {
       void ask();
       await spend(100);
       return 'Gone';
     });
     // A host that never answers, not even once the ask is taken back.
     const answer = () => new Promise(() => undefined);
-    const { platform, app } = desk(
-      (run) => new AgentRuntime(run.parent ? clerk : deskAgent, host),
+    const { platform, app } = oneCell(
+      (run) => new AgentRuntime(run.parent ? assistant : mainAgent, host),
       { spec: within(300), ask: answer },
-      new Map([['outbox', outbox]]),
+      new Map([['sender', sender]]),
     );
     try {
       const result = await app.start({
-        owner: 'office',
-        revision: app.publish(office),
-        entry: 'desk',
+        owner: 'alice',
+        revision: app.publish(graph),
+        entry: 'main',
         workspace: dir,
-        input: 'Ask the clerk',
+        input: 'Ask the assistant',
       });
       assert.deepEqual(
         [heard, result.isError, result.structuredContent.error],
@@ -334,16 +334,16 @@ test("a call its agent withdraws while it waits in the inbox stays there for the
       await spend(600);
       return 'Done';
     });
-    const { platform, app } = desk(
+    const { platform, app } = oneCell(
       () => new AgentRuntime(agent, host),
       { spec: within(300) },
-      new Map([['outbox', outbox]]),
+      new Map([['sender', sender]]),
     );
     try {
       const result = await app.start({
-        owner: 'office',
-        revision: app.publish(office),
-        entry: 'desk',
+        owner: 'alice',
+        revision: app.publish(graph),
+        entry: 'main',
         workspace: dir,
         input: 'Send it',
       });
@@ -352,10 +352,10 @@ test("a call its agent withdraws while it waits in the inbox stays there for the
         [['MCP error -32001: Request timed out'], true, 'Timed out after 0 s'],
       );
       // Left for the person, who may still decide it; the run's history has the call withdrawn.
-      const [item] = app.human.inbox('office');
+      const [item] = app.human.inbox('alice');
       assert.equal(item.state, 'pending');
       assert.deepEqual(
-        app.history('office', item.run).map((e) => e.kind),
+        app.history('alice', item.run).map((e) => e.kind),
         ['started', 'call', 'cancelled', 'ended'],
       );
     } finally {
@@ -378,16 +378,16 @@ test("a call whose agent goes before its answer is cut off as a withdrawn one is
       await spend(600);
       return 'Done';
     });
-    const { platform, app } = desk(
+    const { platform, app } = oneCell(
       () => new AgentRuntime(agent, host),
       { spec: within(300) },
-      new Map([['outbox', outbox]]),
+      new Map([['sender', sender]]),
     );
     try {
       const started = app.start({
-        owner: 'office',
-        revision: app.publish(office),
-        entry: 'desk',
+        owner: 'alice',
+        revision: app.publish(graph),
+        entry: 'main',
         workspace: dir,
         input: 'Send it',
       });
@@ -398,9 +398,9 @@ test("a call whose agent goes before its answer is cut off as a withdrawn one is
         [heard, result.isError, result.structuredContent.error],
         [['MCP error -32000: Connection closed'], true, 'Timed out after 0 s'],
       );
-      assert.equal(app.human.inbox('office')[0].state, 'pending');
+      assert.equal(app.human.inbox('alice')[0].state, 'pending');
       assert.deepEqual(
-        app.history('office', run).map((e) => e.kind),
+        app.history('alice', run).map((e) => e.kind),
         ['started', 'call', 'cancelled', 'ended'],
       );
     } finally {
@@ -418,16 +418,16 @@ test("a call made as a task doesn't stop its run's clock while it waits in the i
       await spend(600);
       return 'Done';
     });
-    const { platform, app } = desk(
+    const { platform, app } = oneCell(
       () => new AgentRuntime(agent, host),
       { spec: within(300) },
-      new Map([['outbox', outbox]]),
+      new Map([['sender', sender]]),
     );
     try {
       const started = app.start({
-        owner: 'office',
-        revision: app.publish(office),
-        entry: 'desk',
+        owner: 'alice',
+        revision: app.publish(graph),
+        entry: 'main',
         workspace: dir,
         input: 'Send it',
       });
@@ -442,26 +442,26 @@ test("a call made as a task doesn't stop its run's clock while it waits in the i
 test('a run that withdraws its call to a run it delegated gets its clock back, though that run still waits in the inbox', () =>
   inFolder(async (dir) => {
     const heard = [];
-    // The desk's own limit on its call to the clerk ends it, longer than the desk may take; then it works on for longer
-    // than it had left. The clerk's call waits in the inbox all along.
-    const deskAgent = working(async ({ call, spend }) => {
-      heard.push(await call('ask_clerk', { timeout: 450 }).catch((err) => err.message));
+    // The main cell's own limit on its call to the assistant ends it, longer than the main cell may take; then it works on for longer
+    // than it had left. The assistant's call waits in the inbox all along.
+    const mainAgent = working(async ({ call, spend }) => {
+      heard.push(await call('ask_assistant', { timeout: 450 }).catch((err) => err.message));
       await spend(600);
       return 'Done';
     });
-    const clerk = working(({ call }) => call('send'));
-    const { platform, app } = desk(
-      (run) => new AgentRuntime(run.parent ? clerk : deskAgent, host),
+    const assistant = working(({ call }) => call('send'));
+    const { platform, app } = oneCell(
+      (run) => new AgentRuntime(run.parent ? assistant : mainAgent, host),
       { spec: within(300) },
-      new Map([['outbox', outbox]]),
+      new Map([['sender', sender]]),
     );
     try {
       const result = await app.start({
-        owner: 'office',
-        revision: app.publish(office),
-        entry: 'desk',
+        owner: 'alice',
+        revision: app.publish(graph),
+        entry: 'main',
         workspace: dir,
-        input: 'Ask the clerk',
+        input: 'Ask the assistant',
       });
       assert.deepEqual(
         [heard, result.isError, result.structuredContent.error],
