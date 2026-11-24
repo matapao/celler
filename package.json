@@ -57,7 +57,8 @@
     "typescript": "7.0.2"
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"

@@ -43,7 +43,8 @@ For the people and coding agents who change this code. People who use the librar
 
 - Set `version` in package.json, commit, and push the tag `v<version>`. The Publish workflow (`publish.yml`) runs Test
   and Security, then packs the package once, attests that tarball, publishes it to GitHub Packages as
-  `@matapao/celler`, and attaches it with its SBOM to the tag's release.
+  `@matapao/celler`, and attaches it with its SBOM to the tag's release. The package holds its build (`dist/`) and its
+  source (`src/`), which a host can read, as TypeScript does, where the build has no types.
 - Installing from GitHub Packages takes a token, though the package is public: a host's `.npmrc` maps `@matapao` to
   `https://npm.pkg.github.com`, each person's own `~/.npmrc` holds a classic GitHub token that can read packages, and a
   host's CI needs access in the package's settings. A release's tarball downloads without one; check it with
