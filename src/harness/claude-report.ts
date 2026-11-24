@@ -14,6 +14,7 @@ import type {
   SDKPartialAssistantMessage,
   SDKResultMessage,
 } from '@anthropic-ai/claude-agent-sdk';
+import { stripVTControlCharacters } from 'node:util';
 import { harnessLimits as L } from '../limits.js';
 import { formOf, isRecord, questionFields } from './claude-forms.js';
 import { saysSignedOut, type Turn } from './runtime.js';
@@ -63,6 +64,18 @@ const OPTIONS: AgentAsk['options'] = [
 /** What it is told of a call the person didn't allow. */
 const DECLINED = 'The person declined this.';
 const UNANSWERED = 'No one answered this.';
+
+/** What is left once a terminal's escapes are gone: control characters but a line's end and a tab, and format ones. */
+const UNSEEN = /[^\P{Cc}\n\t]|\p{Cf}/gu;
+
+/** What an agent wrote for a person to read, as plain text, up to its length; nothing when it says nothing. */
+function plainText(text: string | undefined, chars: number): string | undefined {
+  const plain = stripVTControlCharacters(text ?? '')
+    .replace(UNSEEN, '')
+    .trim()
+    .slice(0, chars);
+  return plain || undefined;
+}
 
 const fileOf = (input: unknown) =>
   isRecord(input) ? FILE_KEYS.map((k) => input[k]).find((v): v is string => typeof v === 'string' && !!v) : undefined;
@@ -244,12 +257,16 @@ export class Report {
   readonly permission: CanUseTool = async (tool, input, o): Promise<PermissionResult> => {
     if (tool === 'AskUserQuestion') return this.question(input, o.toolUseID, o.signal);
     const ask = this.t.ask;
-    const answer = ask
-      ? await ask(
-          { call: o.toolUseID, tool, title: o.title ?? summarize(tool, input), input, options: OPTIONS },
-          o.signal,
-        )
-      : null;
+    const reason = plainText(o.decisionReason, L.reasonChars);
+    const asked: AgentAsk = {
+      call: o.toolUseID,
+      tool,
+      title: o.title ?? summarize(tool, input),
+      ...(reason ? { reason } : {}),
+      input,
+      options: OPTIONS,
+    };
+    const answer = ask ? await ask(asked, o.signal) : null;
     if (answer && 'option' in answer && answer.option === 'allow') return { behavior: 'allow', updatedInput: input };
     // A no to writing a file outside its folder is a write refused, which the host may offer the task that folder for.
     const file = WRITE_TOOLS.has(tool) ? fileOf(input) : undefined;

@@ -316,6 +316,10 @@ async function turn(prompt) {
     input,
     tool_use_id: 't1',
     title: 'Run the tests',
+    // Its reason as Claude Code sends it, terminal escapes and all; FAKE_CLAUDE_REASON gives another, or none ('none').
+    ...(process.env.FAKE_CLAUDE_REASON !== 'none'
+      ? { decision_reason: process.env.FAKE_CLAUDE_REASON ?? '\x1b[1mnpm test\x1b[22m is not on the allowlist\x07.' }
+      : {}),
     permission_suggestions: [],
   });
   // With FAKE_CLAUDE_LEAVE_RUNNING, a command of its keeps running after it, and says where it is.

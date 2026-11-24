@@ -21,6 +21,28 @@ import {
   spec,
 } from './support-harness.mjs';
 
+test("an ask carries Claude Code's reason as plain text up to its length, and none where it gives none", () =>
+  inFolder(async (dir) => {
+    const reasonOf = async (reason) => {
+      let asked;
+      const run = new AgentRuntime(fakeClaude({ FAKE_CLAUDE_REASON: reason }), host).run(
+        spec({ cwd: dir, ask: async (q) => ((asked = q), { option: 'allow' }) }),
+        () => undefined,
+      );
+      assert.equal((await run.done).ok, true);
+      return asked;
+    };
+    const long = await reasonOf(
+      `\u202e\x1b]8;;https://example.com\x07Why\x1b]8;;\x07\r\n\t${'x'.repeat(2 * harnessLimits.reasonChars)}`,
+    );
+    assert.equal(long.reason, `Why\n\t${'x'.repeat(harnessLimits.reasonChars - 5)}`);
+    for (const none of ['none', ' \x1b[0m\x07\u200b ']) {
+      const asked = await reasonOf(none);
+      assert.equal(asked.title, 'Run the tests');
+      assert.equal('reason' in asked, false, JSON.stringify(asked));
+    }
+  }));
+
 test('connector values reach Claude Code in its first request and Codex in variables of its own, never on a command line, and a program the agent would start is refused', () =>
   inFolder(async (dir) => {
     const log = path.join(dir, 'claude.jsonl');
@@ -244,13 +266,14 @@ test('an agent knows the host by its name and mark, asks the person before it ac
         cwd: dir,
         prompt: 'Test it',
         systemPrompt: 'Be brief.',
-        ask: async (q) => (asked.push([q.title, q.options.map((o) => o.kind)]), { option: 'allow' }),
+        ask: async (q) => (asked.push([q.title, q.reason, q.options.map((o) => o.kind)]), { option: 'allow' }),
       }),
       (p) => progress.push(p),
     ).done;
     assert.equal(result.ok, true, result.error);
     assert.equal(result.text, 'Hello. Ran them.');
-    assert.deepEqual(asked, [['Run the tests', ['allow_once', 'reject_once']]]);
+    // Its heading and its reason as Claude Code gave them, the reason's terminal escapes gone.
+    assert.deepEqual(asked, [['Run the tests', 'npm test is not on the allowlist.', ['allow_once', 'reject_once']]]);
     // Its session, its call, and what it writes as it streams it.
     assert.ok(
       progress.some((p) => p.type === 'session' && p.sessionId === 'fake-session'),

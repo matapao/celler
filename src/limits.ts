@@ -82,6 +82,8 @@ export const harnessLimits = {
   commandChars: 160,
   searchChars: 80,
   helperChars: 200,
+  /** Why an agent asks before it acts, in its own words, as a host is given it. */
+  reasonChars: 1000,
   /**
    * The largest request a run's MCP server reads: a call's arguments as large as celler takes inline (INLINE_LIMIT),
    * and the JSON-RPC message around them, its tool's name and its _meta.

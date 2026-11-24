@@ -176,7 +176,14 @@ export interface AgentSetting {
 export interface AgentAsk {
   call: string;
   tool: string;
+  /** Its heading: the agent's own, where it gives one, else the call in short ("Bash: npm test"). */
   title: string;
+  /**
+   * Why it asks, in its agent's own words as plain text, where it says: Claude Code's reason for an ask about one of its
+   * own calls, such as a command its sandbox or its rules don't allow as it is. Its whole text, with its terminal escapes
+   * and other control characters taken out, up to its length (limits.ts reasonChars). Codex asks no one.
+   */
+  reason?: string;
   input?: unknown;
   options: { optionId: string; name: string; kind: 'allow_once' | 'reject_once' }[];
   form?: { message: string; fields?: AgentFormField[]; url?: string };
