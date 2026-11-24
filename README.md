@@ -42,7 +42,7 @@ await app.start({ owner, revision, entry: 'review', workspace, input: 'Summarize
 - Authenticate owners. Keep the database and `app.human` outside the harness workspace. One service per database.
 - The broker confines the harness and enforces the workspace boundary: JSON on stdin/stdout, and MCP on fd 3 in `launch` mode.
 - Publish `workspaceNodes` for logged file access with per-tool grants, or leave them out and let the broker mount the workspace for the harness's own file tools: faster, but not in the log.
-- Put anything that sends data to a third party behind `prepare` and `send`. A `call` adapter's arguments leave unreviewed.
+- Put anything that sends data to a third party behind `prepare` and `send`. A `call` adapter's arguments leave unreviewed. A `send` whose request never reached the service throws `NotSent`: its delivery failed. Any other throw leaves it `unknown`.
 - Render approvals with `showApproval` from `@matapao/celler/preview`. It marks every character a reviewer could not see.
 - After a crash, `unknown` deliveries wait for `human.reconcile(owner, id, "sent" | "failed", result?)`: a sent one's result passes its tool's checks, as a delivery's own answer does. Resume a run with `app.reconnect`; `app.end` ends it and everything it delegated.
 - Limits and their defaults are in `src/limits.ts`. Override any of the app's, the broker's or a connector's by name in its options. The harness's, and how deep JSON may nest, are module constants.

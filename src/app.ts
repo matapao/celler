@@ -16,7 +16,8 @@ type Args = Record<string, unknown>;
  * A host capability behind a tool. It either `call`s at once, or `prepare`s a complete packet that a person approves
  * before `send` delivers exactly that packet. Anything that moves data to a third party takes the second form.
  * `verify`, or else `send`, must refuse a packet the adapter would not produce now, such as one for another account.
- * A refusal in `verify` keeps the approval pending; a throw from `send` leaves the delivery `unknown`.
+ * A refusal in `verify` keeps the approval pending; a throw from `send` leaves the delivery `unknown`, unless it is a
+ * `NotSent`: its request never reached the service, and the delivery failed.
  */
 export type Adapter =
   | { call(run: Run, args: Args, signal: AbortSignal): Promise<CallToolResult> }

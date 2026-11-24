@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { fail } from './errors.js';
+import { fail, NotSent } from './errors.js';
 import { canonicalJson, hash, normalizeJson } from './json.js';
 
 export type Run = Readonly<{
@@ -29,11 +29,12 @@ export type EventKind =
   | 'delivery_failed'
   | 'reconciled';
 
-// The approval lifecycle. Every change is a compare-and-set from the state on the left. A crash while `started`
-// also leads to `unknown`, as the send may have arrived, and only the host's reconciliation leaves `unknown`.
+// The approval lifecycle. Every change is a compare-and-set from the state on the left. A send that throws leaves it
+// `unknown`, as it may have arrived, and so does a crash while `started`; one that never left (`NotSent`), `failed`.
+// Only the host's reconciliation leaves `unknown`.
 const lifecycle: Record<ApprovalState, readonly ApprovalState[]> = {
   pending: ['started', 'declined'],
-  started: ['sent', 'unknown'],
+  started: ['sent', 'unknown', 'failed'],
   unknown: ['sent', 'failed'],
   sent: [],
   declined: [],
@@ -404,9 +405,11 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
       // Send the snapshot the person saw, including the original attachment bytes.
       value = await send(item.write, id, signal);
     } catch (error) {
+      // One its adapter says never left has failed; any other may have arrived, and waits for the host's word.
+      const never = error instanceof NotSent;
       atomically(() => {
-        transition(owner, id, 'started', 'unknown');
-        record(item.run.id, 'delivery_failed', { id, tool: item.tool });
+        transition(owner, id, 'started', never ? 'failed' : 'unknown');
+        record(item.run.id, 'delivery_failed', { id, tool: item.tool, ...(never ? { outcome: 'failed' } : {}) });
       });
       throw error;
     }

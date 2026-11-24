@@ -29,6 +29,17 @@ export class CellerError extends Error {
   }
 }
 
+/**
+ * What an adapter's `send` throws when its request never reached the service: refused before it went out, or no
+ * connection made. Its delivery is then recorded as failed, never as sent or unknown.
+ */
+export class NotSent extends Error {
+  constructor(message = 'The request never reached the service', options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'NotSent';
+  }
+}
+
 export function fail(code: ErrorCode, message: string, node?: string): never {
   throw new CellerError(code, message, node);
 }

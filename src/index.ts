@@ -1,6 +1,6 @@
 export { createApp, type Adapter, type AppOptions, type Platform, type Start } from './app.js';
 export type { FieldSummary, NodeConfig } from './catalog.js';
-export { CellerError, type ErrorCode } from './errors.js';
+export { CellerError, NotSent, type ErrorCode } from './errors.js';
 export type {
   ApprovalReview,
   ApprovalState,

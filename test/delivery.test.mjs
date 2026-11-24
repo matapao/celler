@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createApp } from '@matapao/celler';
+import { createApp, NotSent } from '@matapao/celler';
 import { cell, memoryDatabase, object, refused, request, text, tool, until, withClient } from './support.mjs';
 import { graph, packet, pending, use } from './support-approval.mjs';
 
@@ -50,6 +50,64 @@ test("a send that throws leaves its delivery unknown: the agent hears celler's w
   });
   const revision = app.publish(graph);
   assert.deepEqual(await app.start(request(revision)), text('done'));
+});
+
+test("a send that throws NotSent never left: its delivery failed, with its event, and the agent hears celler's words; any other throw is unknown, as before", async (t) => {
+  let thrown;
+  const app = createApp({
+    database: memoryDatabase(t),
+    adapters: new Map([
+      [
+        'delivery',
+        {
+          prepare: async (_run, args) => packet(String(args.message)),
+          send: async () => {
+            throw thrown;
+          },
+        },
+      ],
+    ]),
+    platform: {
+      allowed: () => true,
+      launch: (spec, connect) =>
+        withClient(connect, async (client) => {
+          const outcome = async (key, error) => {
+            thrown = error;
+            const call = use(client, key);
+            const id = await pending(app);
+            // The host's own error comes back to it, whichever it threw.
+            await assert.rejects(app.human.approve('alice', id), (err) => err === error);
+            const heard = await call;
+            const event = app.history('alice', spec.id).findLast((e) => e.kind === 'delivery_failed');
+            const waiting = app.human.inbox('alice').some((row) => row.id === id);
+            return { id, state: app.human.review('alice', id).state, waiting, heard, event: event.detail };
+          };
+          const never = await outcome('k-never', new NotSent('Connection refused by 10.0.0.5'));
+          assert.deepEqual(never, {
+            id: never.id,
+            state: 'failed',
+            waiting: false,
+            heard: { isError: true, content: [{ type: 'text', text: 'Delivery failed' }] },
+            event: { id: never.id, tool: 'send', outcome: 'failed' },
+          });
+          // Failed for good: nothing is left for the host to reconcile.
+          assert.throws(() => app.human.reconcile('alice', never.id, 'sent'), /not unknown/);
+          const maybe = await outcome('k-maybe', new Error('socket hang up'));
+          assert.deepEqual(maybe, {
+            id: maybe.id,
+            state: 'unknown',
+            waiting: true,
+            heard: {
+              isError: true,
+              content: [{ type: 'text', text: 'Delivery outcome unknown until the host reconciles it' }],
+            },
+            event: { id: maybe.id, tool: 'send' },
+          });
+          return text('done');
+        }),
+    },
+  });
+  assert.deepEqual(await app.start(request(app.publish(graph))), text('done'));
 });
 
 /** An approval its run staged, with verify held open until `open()`: a run that stays until it is ended, or leaves. */
