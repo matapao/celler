@@ -4,7 +4,15 @@ import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '@matapao/celler';
-import { AgentRuntime, claudeAgent, codexAgent, harnessPlatform, SimulatedRuntime } from '@matapao/celler/harness';
+import {
+  AgentRuntime,
+  claudeAgent,
+  codexAgent,
+  emptyUsage,
+  failure,
+  harnessPlatform,
+  SimulatedRuntime,
+} from '@matapao/celler/harness';
 import {
   claudeWords,
   codexHome,
@@ -17,7 +25,8 @@ import {
 } from './support-harness.mjs';
 
 // The host's hooks: what an agent asks reaches it, each is called on the object it was given on, it hears an agent's
-// process start and a run that failed, and one that throws leaves no agent working.
+// process start and a run that failed, and one that throws leaves no agent working; and what a runtime of its own makes
+// its results with.
 
 test("what an agent asks before it acts reaches the host with the run it asks in, and with no one to ask it doesn't go ahead", () =>
   inFolder(async (dir) => {
@@ -206,3 +215,22 @@ test(
       }
     }),
 );
+
+test("a host's own runtime makes its results as celler's do: a usage of nothing, and a failed run from what went wrong", () => {
+  assert.deepEqual(emptyUsage(), { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 });
+  // Each one its own: one a runtime adds to is no other's.
+  const used = emptyUsage();
+  used.input += 10;
+  assert.equal(emptyUsage().input, 0);
+  assert.deepEqual(failure('The agent stopped'), {
+    ok: false,
+    text: '',
+    usage: emptyUsage(),
+    costUsd: null,
+    error: 'The agent stopped',
+    runtimeDown: false,
+    permissionDenials: [],
+  });
+  // One that takes its runtime offline until it is fixed.
+  assert.equal(failure('Not signed in', true).runtimeDown, true);
+});
