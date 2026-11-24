@@ -220,10 +220,10 @@ test("an agent that isn't signed in takes its runtime offline in the host's word
       spec({ cwd: dir, resume: true, sessionId: 'missing' }),
       () => undefined,
     ).done;
-    // Only its words say so: no field of its SDK's, so no reason why it ended.
+    // Only its words say so, and the harness already tells from them that it has no such session: that is its reason.
     assert.deepEqual(
       [gone.ok, gone.runtimeDown, gone.ended, gone.error],
-      [false, false, undefined, 'Session missing could not be resumed: not found'],
+      [false, false, 'session-not-found', 'Session missing could not be resumed: not found'],
     );
   }));
 

@@ -331,7 +331,7 @@ export class Report {
     if (!r) {
       const said = [this.t.stderr().trim(), this.error ?? ''].filter(Boolean).join('\n');
       if (spec.resume && /no conversation found/i.test(said))
-        return failed(`Session ${spec.sessionId} could not be resumed: not found`);
+        return { ...failed(`Session ${spec.sessionId} could not be resumed: not found`), ended: 'session-not-found' };
       if (saysSignedOut(said, SIGN_IN_RE)) return failed(signedOut, true);
       return { ...failed(''), error: (said || 'Claude Code ended before its turn did').slice(-L.errorChars) };
     }

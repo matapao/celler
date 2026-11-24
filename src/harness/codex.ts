@@ -272,7 +272,7 @@ class Report {
       runtimeDown,
     });
     if (spec.resume && /no rollout found/i.test(why))
-      return failed(`Session ${spec.sessionId} could not be resumed: not found`);
+      return { ...failed(`Session ${spec.sessionId} could not be resumed: not found`), ended: 'session-not-found' };
     // Only a sign-in problem before anything was spent takes the whole runtime offline.
     if (saysSignedOut(why, SIGN_IN_RE) && !u) return failed(signedOut, true);
     return failed(why);

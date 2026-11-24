@@ -55,6 +55,11 @@ test("why a run ended is a field where it is known for certain: celler's clock r
     assert.deepEqual(await ended({ FAKE_CLAUDE_SLOW: '5000' }, { timeoutMs: 500 }), [false, 'timed-out']);
     assert.deepEqual(await ended({ FAKE_CLAUDE_ENDS: 'rate_limit' }), [false, 'usage-limit']);
     assert.deepEqual(await ended({ FAKE_CLAUDE_ENDS: 'error_max_turns' }), [false, 'max-turns']);
+    // A resumed session it doesn't have: the harness already tells that from Claude Code's refusal, and says so.
+    assert.deepEqual(await ended({ FAKE_CLAUDE_NO_SESSION: '1' }, { resume: true, sessionId: 'gone-session' }), [
+      false,
+      'session-not-found',
+    ]);
     // A budget, which nothing in celler gives an agent, is no reason of its own.
     assert.deepEqual(await ended({ FAKE_CLAUDE_ENDS: 'error_max_budget_usd' }), [false, undefined]);
     // A run that ends with its reply says nothing, nor one that fails for a reason no field gives.

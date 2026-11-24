@@ -107,9 +107,11 @@ export interface RunResult {
   /**
    * Why it ended without its reply, where that is known for certain: celler's clock ran out (`timed-out`), or its
    * agent's SDK says so in a field, never only in words: its account at a usage or rate limit (`usage-limit`), or at the
-   * turns its agent was given (`max-turns`). Unset when nothing says.
+   * turns its agent was given (`max-turns`). And a resumed session its agent doesn't have (`session-not-found`), which
+   * the harness already tells from the agent's own refusal to resume it, and says so in its error. Unset when nothing
+   * says.
    */
-  ended?: 'timed-out' | 'usage-limit' | 'max-turns';
+  ended?: 'timed-out' | 'usage-limit' | 'max-turns' | 'session-not-found';
 }
 
 export interface RunHandle {
