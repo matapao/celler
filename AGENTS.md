@@ -5,9 +5,9 @@ For the people and coding agents who change this code. People who use the librar
 ## Before you finish
 
 - `pnpm test` passes: a strict TypeScript build, then every test.
-- Beside it, reporting only for now: `pnpm lint` (oxlint, knip), `pnpm lint:style` (`pnpm format` applies Prettier),
-  `pnpm check:lines` (500 lines a file), `pnpm test:coverage` and `pnpm check:security` (nothing about the project
-  leaves this computer; CI adds pnpm audit). Each turns required in CI once the code passes it.
+- So do `pnpm lint` (oxlint, knip), `pnpm lint:style` (`pnpm format` applies Prettier), `pnpm check:lines` (500 lines
+  a file) and `pnpm check:security` (nothing about the project leaves this computer; CI adds pnpm audit): CI requires
+  them. `pnpm test:coverage` reports only.
 - A change in behaviour comes with a test. Every invariant below has one.
 - README.md stays at 50 lines or fewer.
 

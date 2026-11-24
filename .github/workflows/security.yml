@@ -22,12 +22,12 @@ permissions:
 
 jobs:
   security:
-    # Reports only until celler's lockfile carries the new tools (the next install), then required. Semgrep's registry
-    # rules, which meet src/preview.ts's non-literal RegExp, now run with --live only and decide nothing.
-    name: Security checks (reports only)
+    # Required on every push and pull request. The live checks (daily, by hand, and before a release) tell and decide
+    # nothing: Semgrep's registry rules among them still meet src/preview.ts's non-literal RegExp.
+    name: Security checks
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    continue-on-error: true
+    continue-on-error: ${{ github.event_name == 'schedule' || inputs.live == true }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

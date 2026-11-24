@@ -10,7 +10,7 @@
 // package name to the registry, runs in CI only, and OSV-Scanner reads a downloaded database. What each looks at:
 // - the lockfile: one YAML document, every package from the registry with nothing but its hash;
 // - hidden characters: format and invisible characters in tracked text files ("Trojan Source", hidden prompts);
-// - licences: every package that ships with this one carries a licence on the list below;
+// - licences: every package that ships with this one or its workspace's packages carries a licence on the list below;
 // - Betterleaks: secrets in every commit (.gitleaks.toml, if there is one);
 // - Semgrep: this repository's own rules; with --live, Semgrep's registry rules too (a `nosemgrep` line says why);
 // - zizmor (offline; with --live, its audits of the actions' repositories) and actionlint: the workflows themselves;
@@ -139,7 +139,7 @@ function sources() {
 
 /** Every package that ships with this one under a licence on the list. pnpm can list them but has no way to fail. */
 function licences() {
-  const out = pnpmOut(['licenses', 'list', '--prod', '--json']);
+  const out = pnpmOut(['licenses', 'list', '--prod', '--json', '--recursive']);
   if (out.status !== 0) {
     console.error(out.stderr);
     return false;

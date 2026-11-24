@@ -1,0 +1,12 @@
+# Betterleaks' and gitleaks' settings for `pnpm check:security` and CI: their own rules, and what is known not to be a
+# secret, each with why. Anything else either finds fails.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "The made-up database addresses the tests throw, to check that an error's credentials never reach the model or a log"
+condition = "AND"
+paths = ['''^test/''']
+regexTarget = "match"
+regexes = ['''postgres://user:supersecret@10\.0\.0\.5''', '''postgres://svc:hunter2@10\.0\.0\.7''']
