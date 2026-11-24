@@ -3,7 +3,7 @@ import test from 'node:test';
 import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { AgentRuntime } from 'celler/harness';
+import { AgentRuntime } from '@matapao/celler/harness';
 import { claudeOnLinux } from '../dist/harness/sandbox/claude.linux.js';
 import { claudeOnMacos } from '../dist/harness/sandbox/claude.macos.js';
 import { claudeOnWindows } from '../dist/harness/sandbox/claude.windows.js';

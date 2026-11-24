@@ -17,7 +17,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { AgentRuntime, claudeAgent } from 'celler/harness';
+import { AgentRuntime, claudeAgent } from '@matapao/celler/harness';
 import { agentEnv, PROXIES, runEnv } from '../dist/harness/programs.js';
 import { homeTools, inside, removeScratch, scratchFor, systemTemps } from '../dist/harness/sandbox/places.js';
 import { until } from './support.mjs';

@@ -4,10 +4,12 @@ For the people and coding agents who change this code. People who use the librar
 
 ## Before you finish
 
-- `pnpm test` passes: a strict TypeScript build, then every test.
+- After `pnpm install --frozen-lockfile` (Node.js 24.11+, pnpm as package.json names it), `pnpm test` passes: a strict
+  TypeScript build, then every test.
 - So do `pnpm lint` (oxlint, knip), `pnpm lint:style` (`pnpm format` applies Prettier), `pnpm check:lines` (500 lines
   a file) and `pnpm check:security` (nothing about the project leaves this computer; CI adds pnpm audit): CI requires
   them. `pnpm test:coverage` reports only.
+- When package.json or an entry point changes: `pnpm check:package` (publint and attw: the package as npm gets it).
 - A change in behaviour comes with a test. Every invariant below has one.
 - README.md stays at 50 lines or fewer.
 
@@ -36,3 +38,13 @@ For the people and coding agents who change this code. People who use the librar
 - `preview.ts`: the approval view for browsers. `errors.ts`, `json.ts`, `limits.ts`: shared helpers.
 - `harness/`: the coding agents a host runs. `agents.ts`: Claude Code and Codex as data. `sandbox/`: each agent's settings for each system, data only, and a run's places (`places.ts`). `runtime.ts`: the one runtime that runs either, and what a run is given (`Turn`); `setup.ts`: a run checked and set up; `clock.ts`: its clock; `processes.ts`: the processes it starts and ends, the agent's sign-in too; `versions.ts`: each program's version. `claude.ts`, `codex.ts`: a run through each agent's own SDK; `claude-report.ts`: Claude Code's run as it reports it, its forms in `claude-forms.ts`. `platform.ts`: the `Platform` that runs a cell's agent with its run's MCP server. `programs.ts`: finding them. `simulated.ts`, and `types.ts`, the run each one takes and gives.
 - An agent SDK updated: `agentVersions` in `limits.ts` becomes the version of the agent it is made with (a test holds them together).
+
+## Releasing
+
+- Set `version` in package.json, commit, and push the tag `v<version>`. The Publish workflow (`publish.yml`) runs Test
+  and Security, then packs the package once, attests that tarball, publishes it to GitHub Packages as
+  `@matapao/celler`, and attaches it with its SBOM to the tag's release.
+- Installing from GitHub Packages takes a token, though the package is public: a host's `.npmrc` maps `@matapao` to
+  `https://npm.pkg.github.com`, each person's own `~/.npmrc` holds a classic GitHub token that can read packages, and a
+  host's CI needs access in the package's settings. A release's tarball downloads without one; check it with
+  `gh attestation verify <tarball> --repo matapao/celler`.

@@ -1,8 +1,12 @@
 {
-  "name": "celler",
+  "name": "@matapao/celler",
   "version": "0.1.0",
-  "private": true,
+  "description": "An MCP gateway for agent harnesses: a published graph of cells and tools, with grants, delegation, an audit log and an approval inbox for everything that leaves the host",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matapao/celler.git"
+  },
   "type": "module",
   "packageManager": "pnpm@11.28.9+sha512.35421cea2720eca3f5ad722b67e8ef18f4d3cd4745ed2fcfeb0dc288d4e9437fad3870d91ee6e83f268f0f6f7e0f62723317b19617bb45ee4333172ef51159f8",
   "engines": {
@@ -30,7 +34,8 @@
     "lint:style": "oxlint --type-aware -D no-nested-ternary -D typescript/no-explicit-any src test scripts && prettier --check .",
     "format": "prettier --write .",
     "check:lines": "node scripts/check-lines.mjs",
-    "check:security": "node scripts/check-security.mjs"
+    "check:security": "node scripts/check-security.mjs",
+    "check:package": "pnpm run build && publint --strict && attw --pack . --profile esm-only"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.330",
@@ -41,12 +46,20 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
     "@types/node": "^24.19.2",
     "c8": "12.0.0",
     "knip": "6.45.1",
     "oxlint": "1.93.0",
     "oxlint-tsgolint": "7.0.2007",
     "prettier": "3.10.1",
+    "publint": "0.3.25",
     "typescript": "7.0.2"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   }
 }

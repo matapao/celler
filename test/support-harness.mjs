@@ -4,8 +4,8 @@ import path from 'node:path';
 import { after } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { createApp } from 'celler';
-import { claudeAgent, codexAgent, harnessPlatform } from 'celler/harness';
+import { createApp } from '@matapao/celler';
+import { claudeAgent, codexAgent, harnessPlatform } from '@matapao/celler/harness';
 
 // What the harness tests share: the host and its words, the agents with their programs the stand-ins, a run as the
 // runtime takes it, its places, a folder for a test, and a host office of one cell run by the harness platform.

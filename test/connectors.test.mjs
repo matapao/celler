@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createApp, readMcp, postJson } from 'celler';
+import { createApp, readMcp, postJson } from '@matapao/celler';
 import { cell, memoryDatabase, object, refused, request, text, tool, until, withClient } from './support.mjs';
 
 test('an MCP read preserves the upstream tool name, arguments and structured result', async (t) => {

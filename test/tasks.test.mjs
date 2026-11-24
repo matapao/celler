@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { CallToolResultSchema, CreateTaskResultSchema } from '@modelcontextprotocol/sdk/types.js';
-import { createApp } from 'celler';
+import { createApp } from '@matapao/celler';
 import { appLimits } from '../dist/limits.js';
 import { cell, memoryDatabase, object, refused, request, text, tool, withClient } from './support.mjs';
 import { packet, pending } from './support-approval.mjs';

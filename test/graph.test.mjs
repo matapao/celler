@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createApp } from 'celler';
+import { createApp } from '@matapao/celler';
 import { cell, discover, memoryDatabase, object, refused, request, text, tool, withClient } from './support.mjs';
 
 test('publication validates every edge including delegation targets', (t) => {

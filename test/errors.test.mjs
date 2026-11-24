@@ -3,7 +3,7 @@ import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { createApp } from 'celler';
+import { createApp } from '@matapao/celler';
 import { callThenClose, cell, memoryDatabase, request, text, tool, until, withClient } from './support.mjs';
 
 test("a policy that throws reaches the agent only in celler's words, while listing or calling, listed first or not", async (t) => {

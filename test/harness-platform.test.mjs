@@ -3,8 +3,8 @@ import test from 'node:test';
 import http from 'node:http';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { createApp } from 'celler';
-import { AgentRuntime, claudeAgent, codexAgent, harnessPlatform, SimulatedRuntime } from 'celler/harness';
+import { createApp } from '@matapao/celler';
+import { AgentRuntime, claudeAgent, codexAgent, harnessPlatform, SimulatedRuntime } from '@matapao/celler/harness';
 import { harnessLimits } from '../dist/limits.js';
 import {
   claudeWords,

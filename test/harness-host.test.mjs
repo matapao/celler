@@ -3,8 +3,8 @@ import test from 'node:test';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { createApp } from 'celler';
-import { AgentRuntime, claudeAgent, codexAgent, harnessPlatform, SimulatedRuntime } from 'celler/harness';
+import { createApp } from '@matapao/celler';
+import { AgentRuntime, claudeAgent, codexAgent, harnessPlatform, SimulatedRuntime } from '@matapao/celler/harness';
 import {
   claudeWords,
   codexHome,

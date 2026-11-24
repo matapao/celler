@@ -5,7 +5,7 @@ import net from 'node:net';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { AgentRuntime, harnessPlatform, SimulatedRuntime } from 'celler/harness';
+import { AgentRuntime, harnessPlatform, SimulatedRuntime } from '@matapao/celler/harness';
 import { desk, fakeClaude, host, inFolder, sentTo } from './support-harness.mjs';
 
 // Runs stopped, and the platform closed: a run cancelled before its agent starts, or stopped through celler, and the

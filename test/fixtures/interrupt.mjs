@@ -1,7 +1,7 @@
 // Stages two approvals, then exits mid-send of the first (code 49), as a crash would.
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createApp } from 'celler';
+import { createApp } from '@matapao/celler';
 import { object, request, tool, cell, withClient } from '../support.mjs';
 
 const database = new DatabaseSync(process.argv[2]);

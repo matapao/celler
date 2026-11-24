@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { AgentRuntime, chosenPrograms, claudeAgent, codexAgent, findProgram } from 'celler/harness';
+import { AgentRuntime, chosenPrograms, claudeAgent, codexAgent, findProgram } from '@matapao/celler/harness';
 import { agentVersions } from '../dist/limits.js';
 import { agentEnv, CODEX_TARGETS, codexProgram } from '../dist/harness/programs.js';
 import {

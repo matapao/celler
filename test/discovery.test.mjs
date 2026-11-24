@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
-import { createApp } from 'celler';
+import { createApp } from '@matapao/celler';
 import { cell, discover, memoryDatabase, object, refused, request, text, tool, until, withClient } from './support.mjs';
 
 test('discovery, pinned grants and private delegation use the same published graph', async (t) => {

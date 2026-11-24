@@ -1,12 +1,13 @@
 # The build, the lint (oxlint and knip), the owner's style (no nested ternaries or explicit any, and Prettier), the
-# line limits and every test, on every push and pull request, on Node 24 (package.json's engines), on Linux and on
-# macOS, whose agents' sandboxes and folders' names differ; holds no secrets.
+# line limits, every test and the package as npm would get it, on every push and pull request, on Node 24
+# (package.json's engines), on Linux and on macOS, whose agents' sandboxes and folders' names differ; holds no secrets.
 
 name: Test
 
 on:
   push:
   pull_request:
+  workflow_call: # publish.yml, before a release
 
 permissions:
   contents: read
@@ -36,3 +37,4 @@ jobs:
       - run: pnpm lint:style
       - run: pnpm check:lines
       - run: pnpm test
+      - run: pnpm check:package
