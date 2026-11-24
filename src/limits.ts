@@ -21,9 +21,9 @@ export const appLimits = {
   maxRuns: 16,
   /** Tool calls in flight at once in one run. */
   maxConcurrency: 32,
-  /** Tasks one MCP connection holds at once, finished or not. */
+  /** Tasks one MCP connection works on at once. An ended one is kept for its ttl besides. */
   maxTasks: 64,
-  /** The longest a task is kept, whatever its client asks; under 2**31 ms, as timers take. */
+  /** The longest a task is kept once it has ended, whatever its client asks. */
   taskTtlMs: 60 * 60_000,
   /** Pending approvals in one owner's inbox. */
   maxPendingApprovals: 32,
@@ -62,6 +62,8 @@ export const postLimits = { timeoutMs: 30_000, maxResponseBytes: 1024 * 1024 }
 
 /** How deep objects and arrays may nest in the JSON celler copies: a graph, a run's input, an approval's arguments. */
 export const jsonDepth = 256
+/** MCP's tasks: how many a listing gives at once, and how often a client is told to look again. */
+export const taskListing = { pageSize: 10, pollMs: 1000 }
 /** The coding agents' harnesses: how long a program is waited for, and how much of what it says is kept. */
 export const harnessLimits = {
   /** A program asked its version or whether it is signed in. */
@@ -102,13 +104,19 @@ export const harnessLimits = {
 export const agentVersions = { claude: "2.1.330", codex: "0.171.0" }
 
 const ZERO_ALLOWED = new Set(["discoveryBytes", "maxDepth", "progressIntervalMs"])
+/** The longest wait a timer takes in one go: a bound in milliseconds (its name ends in Ms) is one, and stays under it. */
+const LONGEST_TIMER_MS = 2 ** 31 - 1
 
-/** Each default unless the options name it. Every bound is a positive safe integer, or zero where allowed. */
+/**
+ * Each default unless the options name it. Every bound is a positive safe integer, or zero where allowed; one in
+ * milliseconds no longer than a timer waits, which would wait 1 ms for a longer one.
+ */
 export function withLimits<T extends Record<string, number>>(defaults: T, options: { [K in keyof T]?: number }): T {
   const limits: Record<string, number> = {}
   for (const [name, fallback] of Object.entries(defaults)) {
     const value = options[name as keyof T] ?? fallback
     if (!Number.isSafeInteger(value) || value < (ZERO_ALLOWED.has(name) ? 0 : 1)) fail("INVALID_CONFIG", "Invalid " + name)
+    if (name.endsWith("Ms") && value > LONGEST_TIMER_MS) fail("INVALID_CONFIG", `Invalid ${name}: longer than a timer waits`)
     limits[name] = value
   }
   return limits as T

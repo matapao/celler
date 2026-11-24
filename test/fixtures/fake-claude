@@ -5,7 +5,9 @@
 // the tools of the HTTP MCP server it was given and calls that one, and its reply ends with the tool's answer. Its
 // sign-in prints FAKE_CLAUDE_LOGIN_URL as a terminal link (OSC 8), as Claude Code does, on its error output with
 // FAKE_CLAUDE_LOGIN_ON_STDERR, and waits for the page's code. With FAKE_CLAUDE_EXPIRED, it says it is signed in, but
-// its turn fails as one signed out does.
+// its turn fails as one signed out does. With FAKE_CLAUDE_SUBSCRIPTION, it is signed in to a subscription. With
+// FAKE_CLAUDE_FORM, one of its MCP servers asks the person for a form, and its reply says what came back. With
+// FAKE_CLAUDE_HELPER, a path outside its folder, it starts a helper, which searches, and is refused writing that file.
 import { spawn } from "node:child_process"
 import { appendFileSync } from "node:fs"
 import path from "node:path"
@@ -55,7 +57,9 @@ const streamed = (id, text) => {
   assistant([{ type: "text", text }], id)
 }
 const usage = { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 5, cache_creation_input_tokens: 7, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 7 } }
-const result = (fields) => send({ type: "result", subtype: "success", is_error: false, duration_ms: 1, duration_api_ms: 1, num_turns: 1, stop_reason: "end_turn", total_cost_usd: 0.01, usage, modelUsage: {}, permission_denials: [], session_id: session, uuid: `u-${++count}`, ...fields })
+// Its total is the session's: a resumed one goes on from what its earlier turns cost, as Claude Code's does.
+const before = flag("resume") ? 0.05 : 0
+const result = (fields) => send({ type: "result", subtype: "success", is_error: false, duration_ms: 1, duration_api_ms: 1, num_turns: 1, stop_reason: "end_turn", total_cost_usd: before + 0.01, usage, modelUsage: {}, permission_denials: [], session_id: session, uuid: `u-${++count}`, ...fields })
 
 /** The answer of FAKE_CLAUDE_TOOL, called on the first HTTP server, its headers as given. */
 async function toolAnswer() {
@@ -78,13 +82,31 @@ async function turn(prompt) {
   send({ type: "system", subtype: "init", session_id: session, model: "claude-haiku-fake", permissionMode: mode, cwd: process.cwd(), tools: [], mcp_servers: [], apiKeySource: "none", claude_code_version: "2.1.330", slash_commands: [], output_style: "default", skills: [], plugins: [], uuid: `u-${++count}` })
   if (process.env.FAKE_CLAUDE_SIGNED_OUT || process.env.FAKE_CLAUDE_EXPIRED) {
     send({ type: "assistant", message: { id: "m-out", type: "message", role: "assistant", model: "claude-haiku-fake", content: [{ type: "text", text: "Not logged in · Please run /login" }] }, error: "authentication_failed", parent_tool_use_id: null, session_id: session, uuid: `u-${++count}` })
-    return result({ is_error: true, result: "Not logged in · Please run /login", total_cost_usd: 0 })
+    // No model was called: nothing used, nothing spent.
+    return result({ is_error: true, result: "Not logged in · Please run /login", total_cost_usd: before, usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } })
   }
   const used = await toolAnswer()
   streamed("m1", "Hello.")
   // A search of the folder, which asks nothing.
   assistant([{ type: "tool_use", id: "g1", name: "Grep", input: { pattern: "TODO", path: "src" } }])
   send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "g1", content: "No matches", is_error: false }] }, parent_tool_use_id: null, session_id: session, uuid: `u-${++count}` })
+  // With FAKE_CLAUDE_HELPER, a helper of its looks around, and it is refused writing a file outside its folder.
+  if (process.env.FAKE_CLAUDE_HELPER) {
+    const done = (id, ok) => send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: ok ? "ok" : "Refused", is_error: !ok }] }, parent_tool_use_id: null, session_id: session, uuid: `u-${++count}` })
+    assistant([{ type: "tool_use", id: "h1", name: "Agent", input: { description: "Look around", prompt: "Look around the folder" } }])
+    send({ type: "assistant", message: { id: `msg-${++count}`, type: "message", role: "assistant", model: "claude-haiku-fake", content: [{ type: "tool_use", id: "h2", name: "Grep", input: { pattern: "FIXME" } }] }, parent_tool_use_id: "h1", session_id: session, uuid: `u-${++count}` })
+    done("h1", true)
+    assistant([{ type: "tool_use", id: "w1", name: "Write", input: { file_path: process.env.FAKE_CLAUDE_HELPER, content: "x" } }])
+    done("w1", false)
+  }
+  // With FAKE_CLAUDE_FORM, an MCP server of its asks the person to fill in a form, and it says what came back.
+  if (process.env.FAKE_CLAUDE_FORM) {
+    const requested_schema = { type: "object", properties: { name: { type: "string", title: "Your name" }, size: { type: "string", enum: ["s", "m"], enumNames: ["Small", "Medium"] } }, required: ["name"] }
+    const answer = await ask({ subtype: "elicitation", mcp_server_name: "github", message: "Who are you?", mode: "form", elicitation_id: "e1", requested_schema })
+    const said = `Form: ${answer.action} ${JSON.stringify(answer.content ?? {})}.`
+    streamed("m2", said)
+    return result({ result: `Hello. ${said}` })
+  }
   // With FAKE_CLAUDE_QUESTION, it asks the person a question of its own, with choices, and says what was picked.
   if (process.env.FAKE_CLAUDE_QUESTION) {
     const questions = [{ question: "Which one?", header: "Pick", multiSelect: false, options: [{ label: "A", description: "The first" }, { label: "B", description: "The second" }] }]
@@ -121,7 +143,7 @@ input.on("line", (line) => {
     log("initialize", message.request)
     servers = message.request.mcpServers ?? {}
     const models = [{ value: "haiku", resolvedModel: "claude-haiku-fake", displayName: "Haiku (fake)" }]
-    return send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: { commands: [], agents: [], models, account: {}, output_style: "default", available_output_styles: [], mcp_servers_applied: message.request.mcpServers !== undefined, claude_code_version: "2.1.330", pid: process.pid } } })
+    return send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: { commands: [], agents: [], models, account: process.env.FAKE_CLAUDE_SUBSCRIPTION ? { subscriptionType: "max" } : {}, output_style: "default", available_output_styles: [], mcp_servers_applied: message.request.mcpServers !== undefined, claude_code_version: "2.1.330", pid: process.pid } } })
   }
   if (message.type === "control_request" && message.request.subtype === "interrupt") {
     log("interrupt", {})

@@ -21,7 +21,8 @@ test("a run's places are its own: nothing of the person's environment, its scrat
     const places = placesIn(dir)
     const env = runEnv({ OWN: "1" }, host, places)
     assert.equal(env.CELLER_TEST_TOKEN, undefined)
-    assert.deepEqual([env.TMPDIR, env.XDG_CACHE_HOME, env.HOST_RUN, env.OWN, env.PATH], [places.scratch.tmp, places.scratch.cache, "1", "1", process.env.PATH])
+    const named = (process.env.PATH ?? "").split(path.delimiter).filter(dir => path.isAbsolute(dir)).join(path.delimiter)
+    assert.deepEqual([env.TMPDIR, env.XDG_CACHE_HOME, env.HOST_RUN, env.OWN, env.PATH], [places.scratch.tmp, places.scratch.cache, "1", "1", named])
     assert.ok(PROXIES.includes("HTTPS_PROXY"))
   } finally {
     delete process.env.CELLER_TEST_TOKEN
@@ -33,6 +34,49 @@ test("a run's places are its own: nothing of the person's environment, its scrat
   const home = realpathSync(dir)
   mkdirSync(path.join(home, ".nvm", "bin"), { recursive: true })
   assert.deepEqual(homeTools([path.join(home, ".nvm", "bin"), home, "/usr/bin", "relative/bin", path.join(home, "gone")].join(path.delimiter), home), [path.join(home, ".nvm", "bin")])
+  // And where a program in one of them that is a link leads, in the home: its folder, and the package or version that
+  // holds a `bin` folder (nvm's npm); never a folder right in the home (.local), nor where a link to what isn't a
+  // program leads.
+  if (process.platform !== "win32") {
+    const nvmBin = path.join(home, ".nvm", "versions", "node", "v24", "bin")
+    const npm = path.join(home, ".nvm", "versions", "node", "v24", "lib", "node_modules", "npm")
+    const local = path.join(home, ".local")
+    const secrets = path.join(home, ".ssh")
+    for (const made of [nvmBin, path.join(npm, "bin"), path.join(local, "bin"), path.join(local, "share", "tool"), secrets]) mkdirSync(made, { recursive: true })
+    writeFileSync(path.join(npm, "bin", "npm-cli.js"), "#!/usr/bin/env node\n", { mode: 0o755 })
+    symlinkSync(path.join(npm, "bin", "npm-cli.js"), path.join(nvmBin, "npm"))
+    writeFileSync(path.join(local, "share", "tool", "tool"), "#!/bin/sh\n", { mode: 0o755 })
+    symlinkSync(path.join(local, "share", "tool", "tool"), path.join(local, "bin", "tool"))
+    writeFileSync(path.join(local, "bin", "real"), "#!/bin/sh\n", { mode: 0o755 })
+    symlinkSync(path.join(local, "bin", "real"), path.join(nvmBin, "real"))
+    writeFileSync(path.join(secrets, "id_ed25519"), "secret", { mode: 0o600 })
+    symlinkSync(path.join(secrets, "id_ed25519"), path.join(local, "bin", "key"))
+    assert.deepEqual(homeTools([nvmBin, path.join(local, "bin")].join(path.delimiter), home), [
+      nvmBin, path.join(npm, "bin"), npm, path.join(local, "bin"), path.join(local, "share", "tool"),
+    ])
+  }
+  // A PATH entry that isn't a folder in full, or none at all, never reaches a run: one empty or relative would start what
+  // its commands left in its folder as the agent's own git. With none left, the system's own.
+  const was = process.env.PATH
+  try {
+    process.env.PATH = ["relative/bin", "", "/usr/bin", "."].join(path.delimiter)
+    assert.equal(runEnv({}, host, placesIn(dir)).PATH, "/usr/bin")
+    process.env.PATH = ["", "."].join(path.delimiter)
+    assert.ok(runEnv({}, host, placesIn(dir)).PATH.split(path.delimiter).every(dir => path.isAbsolute(dir)))
+    assert.equal(runEnv({ PATH: ["./bin", "/opt/bin"].join(path.delimiter) }, host, placesIn(dir)).PATH, "/opt/bin")
+  } finally {
+    process.env.PATH = was
+  }
+  // A folder named as relative to where the host is: its scratch, and the variables naming it, are named in full.
+  const cwd = process.cwd()
+  try {
+    process.chdir(dir)
+    const relative = scratchFor("work")
+    assert.ok([relative.root, relative.tmp, relative.home, relative.cache].every(dir => path.isAbsolute(dir)), relative.tmp)
+    await removeScratch(relative)
+  } finally {
+    process.chdir(cwd)
+  }
   // macOS's own folder for the person, which holds their temporary files and caches, closed as a whole.
   if (process.platform === "darwin") assert.ok(systemTemps().includes(path.dirname(realpathSync(os.tmpdir()))))
   // Its scratch, which git leaves alone: a commit in the folder holds none of it.
@@ -95,8 +139,9 @@ test("a run's scratch goes once what its agent started has exited, so nothing it
   const fake = fakeClaude()
   const lingering = { ...fake, run: async turn => {
     const late = path.join(turn.places.scratch.tmp, "late", "notes.txt")
-    const script = `setTimeout(() => { const fs = require("node:fs"); fs.mkdirSync(${JSON.stringify(path.dirname(late))}, { recursive: true }); fs.writeFileSync(${JSON.stringify(late)}, "late") }, 300)`
-    turn.spawn(process.execPath, ["-e", script], { env: turn.env })
+    // The file it writes as an argument, never in its code.
+    const script = 'setTimeout(() => { const fs = require("node:fs"); const path = require("node:path"); const late = process.argv[1]; fs.mkdirSync(path.dirname(late), { recursive: true }); fs.writeFileSync(late, "late") }, 300)'
+    turn.spawn(process.execPath, ["-e", script, late], { env: turn.env })
     return { ok: true, text: "", usage: {}, costUsd: null, permissionDenials: [] }
   } }
   const result = await new AgentRuntime(lingering, host).run(spec({ cwd: folder }), () => undefined).done

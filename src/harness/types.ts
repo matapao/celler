@@ -79,6 +79,10 @@ export interface RunResult {
   ok: boolean
   text: string
   usage: TokenUsage
+  /**
+   * What this run cost in money, where its agent tells: never for Codex, nor for a run on the person's subscription,
+   * which its plan pays for, nor for a resumed Claude Code session, whose total holds the turns before it.
+   */
   costUsd: number | null
   model?: string
   error?: string
@@ -92,8 +96,13 @@ export interface RunResult {
 }
 
 export interface RunHandle {
+  /** Its agent's process, once it started, where the runtime knows it. */
   pid?: number
+  /** Settles once its agent has started, or once it won't: `pid` is known from then. */
+  started?: Promise<void>
   done: Promise<RunResult>
+  /** Settles after `done`, once what the run left is gone: its processes, its scratch. A host that exits waits for it. */
+  cleaned?: Promise<void>
   cancel(): void
   /**
    * Stops the run's clock until the release it returns: while the person decides what the run waits on, such as one of

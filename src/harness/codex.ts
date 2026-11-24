@@ -86,13 +86,38 @@ export async function runCodex(t: Turn, o: { models: Record<ModelTier, string>; 
   const options: ThreadOptions = { workingDirectory: spec.cwd, skipGitRepoCheck: true, ...(model ? { model } : {}), ...(effort ? { modelReasoningEffort: effort } : {}) }
   const thread = spec.resume ? codex.resumeThread(spec.sessionId, options) : codex.startThread(options)
   const report = new Report(t, model, effort)
+  // What it says once its run has ended is no one's.
+  let over = false
   try {
     const { events } = await thread.runStreamed(inputOf(spec), { signal: t.signal })
-    for await (const e of events) report.event(e)
+    const read = (async () => {
+      for await (const e of events) if (!over) report.event(e)
+    })()
+    await stoppedWithin(read, t.signal)
   } catch (err) {
     report.broke(err)
   }
+  over = true
   return report.ending(o.signedOut)
+}
+
+/**
+ * Its run read to the end, or for a grace once it was stopped: its SDK asks it to end (SIGTERM) and keeps its process to
+ * itself, so a Codex that doesn't end then holds its run no longer.
+ */
+function stoppedWithin(read: Promise<void>, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let grace: NodeJS.Timeout | undefined
+    const stopped = () => {
+      grace = setTimeout(() => reject(new Error("Codex didn't end when it was stopped")), L.exitGraceMs)
+    }
+    if (signal.aborted) stopped()
+    else signal.addEventListener("abort", stopped, { once: true })
+    read.then(resolve, reject).finally(() => {
+      clearTimeout(grace)
+      signal.removeEventListener("abort", stopped)
+    })
+  })
 }
 
 /** One run as Codex reports it: its reply, its commands, edits and tool calls, its usage, what it couldn't write. */
@@ -180,7 +205,8 @@ class Report {
     const u = this.usage
     const result = {
       text: this.text,
-      usage: u ? { ...emptyUsage(), input: u.input_tokens, output: u.output_tokens, cacheRead: u.cached_input_tokens, cacheWrite5m: u.cache_write_input_tokens } : emptyUsage(),
+      // Its input counts what it read from its cache too, which is counted on its own.
+      usage: u ? { ...emptyUsage(), input: Math.max(0, u.input_tokens - u.cached_input_tokens), output: u.output_tokens, cacheRead: u.cached_input_tokens, cacheWrite5m: u.cache_write_input_tokens } : emptyUsage(),
       costUsd: null,
       ...(this.model ? { model: this.model } : {}),
       permissionDenials: [],

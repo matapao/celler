@@ -34,6 +34,30 @@ test("a run's folder that is or holds the person's home, the filesystem's root o
   }
 }))
 
+test("a run's folder whose path a sandbox would take as a pattern, or that is in an agent's own settings, is refused before anything is made in it", () => inFolder(async dir => {
+  const log = path.join(dir, "agent.jsonl")
+  const runtime = new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log }), host)
+  for (const name of ["Client [ACME]", "all*", "what?"]) {
+    const cwd = path.join(dir, name)
+    mkdirSync(cwd)
+    const refused = await runtime.run(spec({ cwd }), () => undefined).done
+    assert.match(refused.error ?? "", /its path holds \* \? \[ or \], which the agents' sandboxes take as a pattern$/, name)
+    assert.equal(existsSync(path.join(cwd, ".celler")), false, name)
+  }
+  // An agent's settings, its own home's (~/.codex, ~/.claude) or a repository's, wherever no variable names them; each
+  // that can hold a folder.
+  for (const name of AGENT_SETTINGS.filter(name => name !== ".mcp.json")) {
+    const cwd = path.join(dir, "repo", name, "skills")
+    mkdirSync(cwd, { recursive: true })
+    const refused = await runtime.run(spec({ cwd }), () => undefined).done
+    assert.match(refused.error ?? "", new RegExp(`it is in \\${name}, the settings of an agent celler runs, which no run may change$`), name)
+    // To read, too.
+    const reading = await runtime.run(spec({ cwd: dir, readable: [cwd] }), () => undefined).done
+    assert.match(reading.error ?? "", /^A run can't read /, name)
+  }
+  assert.equal(existsSync(log), false)
+}))
+
 test("a place no run may reach is refused by every name it has: in another case, or by its name on macOS's data volume", () => {
   if (process.platform !== "darwin") return
   const home = os.homedir()
@@ -152,10 +176,14 @@ test("each harness's settings for each system keep its commands to the folder an
       assert.deepEqual(own.settings.permissions.deny, AGENT_SETTINGS.flatMap(name => [`Edit(**/${name})`, `Edit(**/${name}/**)`]), at)
       assert.deepEqual([own.settings.disableClaudeAiConnectors, own.settings.autoMemoryEnabled], [true, false], at)
       // Its own tools are a list: none that reach outside the computer, those a coding agent works with, and to read,
-      // none that write.
+      // none that write: no commands either, which its sandbox always lets write its working folder.
       for (const tool of ["WebFetch", "WebSearch", "RemoteTrigger", "PushNotification", "DesignSync", "SendToProject"]) assert.equal(own.tools.includes(tool), false, `${at}: ${tool}`)
-      for (const tool of ["Read", "Glob", "Grep", "Bash", "Agent", "ToolSearch", "AskUserQuestion"]) assert.ok(own.tools.includes(tool), `${at}: ${tool}`)
-      for (const tool of ["Write", "Edit", "NotebookEdit"]) assert.equal(own.tools.includes(tool), purpose === "work", `${at}: ${tool}`)
+      for (const tool of ["Read", "Glob", "Grep", "Agent", "ToolSearch", "AskUserQuestion"]) assert.ok(own.tools.includes(tool), `${at}: ${tool}`)
+      for (const tool of ["Write", "Edit", "NotebookEdit", "Bash", "TaskStop"]) assert.equal(own.tools.includes(tool), purpose === "work", `${at}: ${tool}`)
+      // On Linux its sandbox skips a pattern for what its commands may not write: the agents' settings at the folder's
+      // top are named in full there, there or not.
+      const named = AGENT_SETTINGS.map(name => `${p.folder}/${name}`)
+      assert.deepEqual(own.sandbox.filesystem.denyWrite, system === "linux" ? named : undefined, at)
       assert.equal(own.permissionMode, purpose === "work" ? "acceptEdits" : "default", at)
     }
   }

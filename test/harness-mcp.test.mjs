@@ -145,3 +145,40 @@ test("a request to the run's MCP server at an address that can't be read is answ
     await platform.close()
   }
 }))
+
+test("a run's MCP server answers only a run's own token, at its one address, and a session only to the run it is in", () => inFolder(async dir => {
+  // Two agents, each waiting until it is told to end, with its run's server.
+  const servers = [], finish = []
+  const waiting = {
+    kind: "waiting",
+    health: async () => ({ ok: true, checkedAt: 0, detail: "" }),
+    run: s => (servers.push(s.mcpServers[0]), { cancel: () => undefined, done: new Promise(resolve => finish.push(resolve)) }),
+  }
+  const { platform, app, revision } = desk(() => waiting)
+  try {
+    const runs = [0, 1].map(() => app.start({ owner: "office", revision, entry: "desk", workspace: dir, input: "x" }))
+    await until(() => servers.length === 2)
+    const [one, other] = servers
+    const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "agent", version: "1" } } }
+    const post = (url, headers, body = initialize) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...headers }, body: JSON.stringify(body) })
+    const opened = await post(one.url, one.headers)
+    assert.equal(opened.status, 200)
+    const session = opened.headers.get("mcp-session-id")
+    await opened.body?.cancel()
+    // No token, one that isn't a run's, a run's own at another address: nothing there.
+    for (const [url, headers] of [[one.url, {}], [one.url, { Authorization: "Bearer not-a-run" }], [one.url, { Authorization: one.headers.Authorization.toLowerCase() }], [new URL("/other", one.url).href, one.headers]]) {
+      const refused = await post(url, headers)
+      assert.equal(refused.status, 404, `${url} ${JSON.stringify(headers)}`)
+      await refused.body?.cancel()
+    }
+    // The other run's token, in the first run's session: not its session.
+    const list = { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }
+    const crossed = await post(other.url, { ...other.headers, "mcp-session-id": session, "mcp-protocol-version": "2025-11-25" }, list)
+    assert.equal(crossed.status, 404)
+    await crossed.body?.cancel()
+    for (const done of finish) done({ ok: true, text: "Done", usage: {}, costUsd: null, permissionDenials: [] })
+    await Promise.all(runs)
+  } finally {
+    await platform.close()
+  }
+}))

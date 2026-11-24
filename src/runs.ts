@@ -9,6 +9,8 @@ import type { appLimits } from "./limits.js"
 import { freezeRun, raceAbort, type Run, type Store } from "./store.js"
 
 type Args = Record<string, unknown>
+/** A run delegated by a call: its id, its arguments' hash, and its result once it ends. */
+type Delegated = { id: string; args: string; result: Promise<CallToolResult> }
 
 function createLru<V>(limit: number) {
   const map = new Map<string, V>()
@@ -54,8 +56,8 @@ export function createRuns(
   const runCache = createLru<{ run: Run; grants: ReadonlySet<string> }>(limits.runCacheSize)
   const activeRuns = new Map<string, number>() // root run id → runs in flight in its delegation tree
   const lifetimes = new Map<string, AbortController>() // run id → ends everything the run owns
-  // run id → its uncollected children, by tool and call key, each with its arguments' hash
-  const delegations = new Map<string, Map<string, { args: string; result: Promise<CallToolResult> }>>()
+  // run id → its uncollected children, by tool and call key, each with its run's id and its arguments' hash
+  const delegations = new Map<string, Map<string, Delegated>>()
 
   function graph(revision: string) {
     let current = graphs.get(revision)
@@ -143,12 +145,12 @@ export function createRuns(
     return node
   }
 
-  async function startRun(request: Start, signal: AbortSignal, parent: Run["parent"]): Promise<CallToolResult> {
+  async function startRun(request: Start, signal: AbortSignal, parent: Run["parent"], id = randomUUID()): Promise<CallToolResult> {
     signal.throwIfAborted()
     const input = normalizeJson(request.input)
     if (Buffer.byteLength(JSON.stringify(input)) > limits.inlineLimit) fail("LIMIT_EXCEEDED", "Input exceeds the inline limit")
     const { input: _raw, ...settings } = request
-    const run = freezeRun({ ...settings, id: randomUUID(), parent })
+    const run = freezeRun({ ...settings, id, parent })
     const current = graph(run.revision)
     const entry = current.runnableCell(run.entry)
 
@@ -201,24 +203,32 @@ export function createRuns(
   // retry with the same key and arguments joins the child or collects its result. The same key with other arguments
   // is the caller's mistake, as it is for an approval.
   async function delegate(
-    run: Run, tool: string, cell: string, args: Args, key: string, signal: AbortSignal, heartbeat?: () => void,
+    run: Run, tool: string, cell: string, args: Args, key: string, signal: AbortSignal,
+    { heartbeat, asTask = false }: { heartbeat?: () => void; asTask?: boolean } = {},
   ): Promise<CallToolResult> {
-    const calls = delegations.get(run.id) ?? new Map<string, { args: string; result: Promise<CallToolResult> }>()
+    const calls = delegations.get(run.id) ?? new Map<string, Delegated>()
     delegations.set(run.id, calls)
     const slot = hash([tool, key])
     const argsHash = hash(args)
     let child = calls.get(slot)
     if (child && child.args !== argsHash) fail("KEY_CONFLICT", "Call key reused with different arguments")
     if (!child) {
+      const id = randomUUID()
       const started = startRun({ owner: run.owner, revision: run.revision, workspace: run.workspace, entry: cell, input: args },
-        lifetime(run.id), { run: run.id, tool, key })
-      const entry = { args: argsHash, result: started }
+        lifetime(run.id), { run: run.id, tool, key }, id)
+      const entry = { id, args: argsHash, result: started }
       started.catch(() => { if (calls.get(slot) === entry) calls.delete(slot) }) // a failed child can be retried
       calls.set(slot, (child = entry))
     }
-    const value = await waitFor(child.result, signal, heartbeat)
-    if (calls.get(slot) === child) calls.delete(slot) // collected: an identical later call is new work
-    return value
+    // Its agent waits on the child while this call waits for it, and not once it is withdrawn; nor for a task's call.
+    const release = asTask ? undefined : platform.waiting?.(run, child.id)
+    try {
+      const value = await waitFor(child.result, signal, heartbeat)
+      if (calls.get(slot) === child) calls.delete(slot) // collected: an identical later call is new work
+      return value
+    } finally {
+      release?.()
+    }
   }
 
   return { graph, keepGraph, checkedResult, loadRunCached, access, lifetime, stop, waitFor, checkAncestors, binding, startRun, delegate }

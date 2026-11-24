@@ -27,7 +27,9 @@ type Operation = {
 }
 
 const NO_NULL = "^[^\\u0000]+$"
-const BASE64_PATTERN = "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+// Base64's characters, with its padding at the end only; its length, a multiple of 4, is checked apart (wire): a pattern
+// that counted in fours would run out of stack on a large file.
+const BASE64_PATTERN = "^[A-Za-z0-9+/]*={0,2}$"
 const READ_ONLY: Tool["annotations"] = { readOnlyHint: true, idempotentHint: true, openWorldHint: false }
 const DESTRUCTIVE: Tool["annotations"] = { readOnlyHint: false, destructiveHint: true, openWorldHint: false }
 const IDEMPOTENT_WRITE: Tool["annotations"] = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
@@ -61,11 +63,14 @@ function operations({ inlineLimit, pathChars, queryChars }: typeof brokerLimits)
         }, ["path"]),
         oneOf: [{ required: ["text"] }, { required: ["base64"] }],
       },
-      // The broker always receives the bytes as base64.
-      wire: args => ({
-        path: args.path,
-        base64: typeof args.text === "string" ? Buffer.from(args.text, "utf8").toString("base64") : args.base64,
-      }),
+      // The broker always receives the bytes as base64, whole.
+      wire: args => {
+        if (typeof args.base64 === "string" && args.base64.length % 4 !== 0) fail("INVALID_ARGS", "base64 must be whole: its length a multiple of 4")
+        return {
+          path: args.path,
+          base64: typeof args.text === "string" ? Buffer.from(args.text, "utf8").toString("base64") : args.base64,
+        }
+      },
     },
   }
 }
@@ -203,7 +208,8 @@ export function createBroker(command: BrokerCommand, allowed: Platform["allowed"
   for (const [op, { description, annotations, inputSchema, wire }] of Object.entries(operations(limits))) {
     const id = "fs." + op
     adapters.set(id, {
-      call: (run, args, signal) =>
+      // Async, so arguments it refuses (wire) reject its call as any other failure does.
+      call: async (run, args, signal) =>
         request("workspace", { owner: run.owner, workspace: run.workspace, op, args: wire ? wire(args) : args }, signal),
     })
     bindings.push({ kind: "tool", id, target: { adapter: id }, definition: { description, annotations, inputSchema } })

@@ -11,7 +11,9 @@ const HIDDEN = invisibleBut("\\t\\n\\r ")
 const HIDDEN_IN_NAME = invisibleBut(" ")
 // A long run of spaces after text can push the rest of a line out of view.
 const LONG_SPACES = /(?<=\S) {16,}/g
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+// Base64's characters, with its padding at the end only. Its length, a multiple of 4, is checked apart: a pattern that
+// counted in fours would run out of stack on a large file.
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 
 // Each view's files' object URLs, and whether the view has been seen in the page: they are freed when it shows
 // something else, or once it has been in the page and left it. One drawn before it is put in the page keeps them.
@@ -33,8 +35,10 @@ function reveal(text: string, hidden = HIDDEN) {
 
 function sanitizeFilename(name: string): string {
   const base = name.split(/[/\\]/).pop() ?? ""
-  const cleaned = base.replace(HIDDEN_IN_NAME, "_").replace(/^[ .]+|[ .]+$/g, "")
-  return cleaned.slice(0, 255) || "attachment"
+  // Its spaces and dots trimmed at the start, cut to a name's length, then trimmed at the end: each in one pass, however
+  // long a run of them is.
+  const cleaned = base.replace(HIDDEN_IN_NAME, "_").replace(/^[ .]+/, "").slice(0, 255).replace(/[ .]+$/, "")
+  return cleaned || "attachment"
 }
 
 function formatBytes(bytes: number): string {
@@ -44,7 +48,7 @@ function formatBytes(bytes: number): string {
 }
 
 function decodeBase64(value: string): Uint8Array<ArrayBuffer> {
-  if (!BASE64.test(value)) throw new Error("Invalid base64 attachment payload")
+  if (value.length % 4 !== 0 || !BASE64.test(value)) throw new Error("Invalid base64 attachment payload")
   const binary = atob(value)
   const bytes = new Uint8Array(new ArrayBuffer(binary.length))
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
@@ -111,9 +115,11 @@ export function showApproval(
   status.textContent = parts.filter(Boolean).join(" | ")
   element.append(status)
 
-  if (item.state !== "pending" || item.runStatus === "cancelled") return
+  if (item.state !== "pending") return
+  // A cancelled run's can't be sent, but it can be declined: it then leaves the inbox.
+  const choices = item.runStatus === "cancelled" ? (["decline"] as const) : (["approve", "decline"] as const)
   const controls = document.createElement("fieldset")
-  for (const choice of ["approve", "decline"] as const) {
+  for (const choice of choices) {
     const button = document.createElement("button")
     button.type = "button"
     button.textContent = choice

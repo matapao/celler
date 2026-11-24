@@ -181,7 +181,22 @@ export function runEnv(add: Record<string, string>, host: Pick<Host, "mark">, pl
   for (const name of [...KEPT, ...(isWin ? KEPT_ON_WINDOWS : [])]) if (process.env[name] !== undefined) kept[name] = process.env[name]
   for (const [name, value] of Object.entries(process.env)) if (name.startsWith("LC_") && value !== undefined) kept[name] = value
   const own = { TMPDIR: places.scratch.tmp, TMP: places.scratch.tmp, TEMP: places.scratch.tmp, XDG_CACHE_HOME: places.scratch.cache, npm_config_cache: path.join(places.scratch.cache, "npm") }
-  return withAdded(host.mark({ ...kept, ...own }), add)
+  const env = withAdded(host.mark({ ...kept, ...own }), add)
+  env.PATH = fullPath(env.PATH ?? "")
+  return env
+}
+
+/** Where programs are when no folder on PATH is named in full: the system's own. */
+const SYSTEM_PATH = isWin ? "C:\\Windows\\System32;C:\\Windows" : "/usr/bin:/bin:/usr/sbin:/sbin"
+
+/**
+ * A PATH of only the folders it names in full. One relative to where a program is, or left empty (where it is), would
+ * start what a run's commands left in its folder as the agent's own `git`, outside the sandbox. With none left, the
+ * system's own: a PATH taken away is one a shell fills in, with its working folder in it.
+ */
+function fullPath(value: string): string {
+  const dirs = value.split(path.delimiter).filter((dir) => path.isAbsolute(dir))
+  return dirs.length ? dirs.join(path.delimiter) : SYSTEM_PATH
 }
 
 /** A program's output, or null when it fails; `anyExit` keeps the output of a non-zero exit. */

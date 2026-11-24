@@ -11,13 +11,18 @@
 // - they read the folder and the system, never the person's home (where the host keeps its data), other users' folders,
 //   the system's temporary folders, which other programs share, or Claude Code's own settings and sign-in where the
 //   person keeps them (CLAUDE_CONFIG_DIR); the proxies' values never reach them;
-// - its own tools are the ones listed, none that reach outside the computer, and its file tools keep to the folder.
+// - its own tools are the ones listed, none that reach outside the computer, and its file tools keep to the folder;
+// - to read, none of its tools writes: no file tool that writes, and no commands, which its sandbox always lets write its
+//   working folder, whatever it is told.
+// Here its sandbox takes no pattern for what its commands may not write (it skips any with * ? [ ]): they are kept
+// from the agents' settings at the folder's top only, by name. Its file tools keep from them wherever they are.
 
 import { AGENT_SETTINGS, type Places } from "./places.js"
 
-/** Its own tools: files, commands, helpers, the run's MCP tools and questions to the person. To read, none that write. */
+/** Its own tools: files, commands, helpers, the run's MCP tools and questions to the person. */
 const WORK_TOOLS = ["Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "Bash", "TaskStop", "Agent", "ToolSearch", "TodoWrite", "AskUserQuestion"]
-const WRITING_TOOLS = ["Write", "Edit", "NotebookEdit"]
+/** Those that can change the folder, which a run to read doesn't have: its commands, and stopping one, among them. */
+const WRITING_TOOLS = ["Write", "Edit", "NotebookEdit", "Bash", "TaskStop"]
 
 export function claudeOnLinux(p: Places, purpose: "work" | "read") {
   return {
@@ -35,9 +40,11 @@ export function claudeOnLinux(p: Places, purpose: "work" | "read") {
         // Read again: the folder (its scratch in it), the run's short folder (its shell's temporary one), PATH's folders
         // in the home, and what the host adds.
         allowRead: [p.folder, p.scratch.short, ...p.tools, ...p.readable],
-        // Written: the folder at work, else only its own scratch in it (and its shell's own temporary folder, which its
-        // sandbox adds itself). Nothing else: what isn't on this list can't be written.
+        // Written: the folder at work, else only its own scratch in it, though a run to read has no commands (and its
+        // shell's own temporary folder, which its sandbox adds itself). Nothing else: what isn't here can't be written.
         allowWrite: purpose === "work" ? [p.folder] : [p.scratch.root],
+        // The agents' settings at the folder's top, by name, there or not: the patterns below don't reach its commands here.
+        denyWrite: AGENT_SETTINGS.map((name) => `${p.folder}/${name}`),
       },
       network: {
         allowedDomains: [], // no host at all
@@ -58,8 +65,8 @@ export function claudeOnLinux(p: Places, purpose: "work" | "read") {
         // it keeps readable for git), and it opens again the folders its tools are in there.
         blockReadsOutsideWorkingDirectories: true,
         blockWritesOutsideWorkingDirectories: true,
-        // The folder's own settings for the agents celler runs, never written (AGENT_SETTINGS): by its own file tools,
-        // nor by its commands, as Claude Code puts these rules into its sandbox too.
+        // The folder's own settings for the agents celler runs, never written (AGENT_SETTINGS) by its own file tools,
+        // wherever they are; its commands are kept from them by denyWrite above.
         deny: AGENT_SETTINGS.flatMap((name) => [`Edit(**/${name})`, `Edit(**/${name}/**)`]),
       },
       disableClaudeAiConnectors: true, // only the host's connectors, not the person's claude.ai ones

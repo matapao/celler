@@ -3,6 +3,7 @@
 
 import {
   query,
+  type AccountInfo,
   type CanUseTool,
   type EffortLevel,
   type ElicitationRequest,
@@ -206,7 +207,7 @@ export async function runClaude(t: Turn, o: { models: Record<ModelTier, string>;
   }
   t.signal.addEventListener("abort", stop, { once: true })
   if (t.signal.aborted) stop()
-  q.initializationResult().then((init) => report.named(init.models), () => undefined)
+  q.initializationResult().then((init) => report.named(init.models, init.account), () => undefined)
   try {
     for await (const m of q) report.message(m)
   } catch (err) {
@@ -232,6 +233,8 @@ class Report {
   private model?: string
   /** Its models' names in its own words, by the model each is. */
   private names = new Map<string, string>()
+  /** It runs on the person's subscription, whose plan pays: what it would cost is no one's to count. */
+  private subscribed = false
   /** Forms and pages waiting on the person, each of which it can take back. */
   private forms = new Map<string, AbortController>()
   private formCount = 0
@@ -239,8 +242,9 @@ class Report {
 
   constructor(private t: Turn) {}
 
-  named(models: ModelInfo[]): void {
+  named(models: ModelInfo[], account: AccountInfo | undefined): void {
     for (const m of models) this.names.set(m.resolvedModel ?? m.value, m.displayName)
+    this.subscribed = Boolean(account?.subscriptionType)
   }
 
   message(m: SDKMessage): void {
@@ -383,17 +387,21 @@ class Report {
       if (file && outside(file, spec.cwd)) this.refused.add(file)
       return summarize(d.tool_name, d.tool_input)
     })
+    const usage = r ? usageOf(r.usage) : emptyUsage()
+    // Its total is the session's, from its first turn on, and an estimate: the run's own only for a new session, and
+    // nothing at all on a subscription.
+    const counted = r && !spec.resume && !this.subscribed
     const result = {
       text: r?.subtype === "success" ? r.result : this.writing,
-      usage: r ? usageOf(r.usage) : emptyUsage(),
-      costUsd: r ? r.total_cost_usd : null,
+      usage,
+      costUsd: counted ? r.total_cost_usd : null,
       ...(this.model ? { model: this.model } : {}),
       permissionDenials,
       refusedWrites: [...this.refused],
     }
     const failed = (error: string, runtimeDown = false) => ({ ...result, ok: false, error: error.slice(0, L.errorChars), runtimeDown })
-    // Only a sign-in problem before anything was spent takes the whole runtime offline.
-    const spent = (r?.total_cost_usd ?? 0) > 0
+    // Only a sign-in problem before this turn used anything takes the whole runtime offline.
+    const spent = usage.input + usage.output + usage.cacheRead + usage.cacheWrite5m + usage.cacheWrite1h > 0
     if (this.signedOut && !spent) return failed(signedOut, true)
     if (!r) {
       const said = [this.t.stderr().trim(), this.error ?? ""].filter(Boolean).join("\n")

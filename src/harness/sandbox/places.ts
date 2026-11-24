@@ -4,7 +4,7 @@
 // closed as a whole, and PATH, which declares the person's programs, is what opens their folders in it again. These are
 // facts about the run, worked out once as it starts, each folder by its real name.
 
-import { lstatSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { chmod, lstat, readdir, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -69,7 +69,8 @@ const SCRATCH = ".celler"
  * of its own, so a commit made in the folder holds none of it, nor does a search of the folder's files.
  */
 export function scratchFor(folder: string): Places["scratch"] {
-  const parent = path.join(folder, SCRATCH)
+  // By its full path, as the run's variables name it (TMPDIR), whatever folder each of its programs is in.
+  const parent = path.resolve(folder, SCRATCH)
   mkdirSync(parent, { recursive: true })
   // Inside the folder as it really is, never through a link a run or a repository put in its place: the run's commands
   // may write in their scratch, so one made through a link would open where it leads to them. Nothing is made through a
@@ -201,14 +202,22 @@ export function systemTemps(): string[] {
   return [...out]
 }
 
+/** What the agents' sandboxes take as a pattern in a path they are given, not as itself: Claude Code's, Codex's. */
+const PATTERN = /[*?[\]]/
+
 /**
  * Why a run can't be given a folder, to work in or to read (`as`), or null: the same for its folder and for each the
  * host adds. One that is, or holds, the person's home or one of the system's temporary folders would open them all to
  * the run, and the filesystem's root holds them all; one that is, holds or is in the agent's own home (`agentHomes`)
- * would open its settings and sign-in. Each place by every name it has.
+ * would open its settings and sign-in, as one in an agent's settings wherever they are (AGENT_SETTINGS: ~/.codex, a
+ * repository's .claude) would. One whose path a sandbox would take as a pattern could open other places than itself:
+ * Claude Code doesn't keep its commands from the home for such a folder. Each place by every name it has.
  */
 export function unfitFolder(folder: string, agentHomes: string[] = [], as: "work in" | "read" = "work in"): string | null {
   const real = canonical(folder)
+  if (PATTERN.test(real)) return `A run can't ${as} ${real}: its path holds * ? [ or ], which the agents' sandboxes take as a pattern`
+  const settings = real.split(path.sep).find((name) => AGENT_SETTINGS.includes(name))
+  if (settings) return `A run can't ${as} ${real}: it is in ${settings}, the settings of an agent celler runs, which no run may change`
   const shared = [canonical(os.homedir()), ...systemTemps(), canonical(os.tmpdir())].flatMap(namesOf)
   const held = shared.find((place) => inside(real, place))
   if (held) return `A run can't ${as} ${real}: it holds ${held}, which no run may reach`
@@ -219,21 +228,67 @@ export function unfitFolder(folder: string, agentHomes: string[] = [], as: "work
   return null
 }
 
-/** The folders on a PATH that are inside the home, by their real paths: never the home itself. */
+/**
+ * The folders on a PATH that are inside the home, by their real paths, never the home itself; and, for each program in
+ * them that is a link to one elsewhere in the home (nvm's npm, a version manager's tools), where that program is.
+ */
 export function homeTools(pathVariable: string, home: string): string[] {
   const out = new Set<string>()
   for (const entry of pathVariable.split(path.delimiter)) {
     const dir = path.isAbsolute(entry) ? realFolder(entry) : null
-    if (dir && dir !== home && inside(home, dir)) out.add(dir)
+    if (!dir || dir === home || !inside(home, dir)) continue
+    out.add(dir)
+    for (const linked of linkedTools(dir, home)) out.add(linked)
   }
   return [...out]
 }
 
+/** Whether a file is a program its owner can run. */
+function isProgram(file: string): boolean {
+  try {
+    const stat = statSync(file)
+    return stat.isFile() && (stat.mode & 0o100) !== 0
+  } catch {
+    return false
+  }
+}
+
 /**
- * A run's places, as it starts: its folder and the scratch in it, the agent's own home, what the host adds and hides;
- * each folder by its real path, as the agents' sandboxes see it.
+ * Where the programs in a folder that are links lead, in the home: the folder each one is in, and for one in a `bin`
+ * folder, what holds that (its package, a version of a tool), whose files it runs with. Never the home, nor a folder
+ * right in it (.local, .cargo), which holds more of the person's than their programs. Only a link to a program counts.
  */
-export function placesFor(o: { folder: string; scratch: Places["scratch"]; agentHomes: string[]; readable?: string[]; hidden: string[] }): Places {
+function linkedTools(dir: string, home: string): string[] {
+  const out: string[] = []
+  let names: string[] = []
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return out
+  }
+  for (const name of names) {
+    const file = path.join(dir, name)
+    let real: string
+    try {
+      if (!lstatSync(file).isSymbolicLink()) continue
+      real = realpathSync.native(file)
+    } catch {
+      continue
+    }
+    const folder = realFolder(path.dirname(real))
+    if (!folder || !isProgram(real) || folder === home || !inside(home, folder)) continue
+    out.push(folder)
+    const holder = path.dirname(folder)
+    if (path.basename(folder) === "bin" && holder !== home && path.dirname(holder) !== home) out.push(holder)
+  }
+  return out
+}
+
+/**
+ * A run's places, as it starts: its folder and the scratch in it, the agent's own home, its programs' folders in the
+ * home by the PATH it runs with, what the host adds and hides; each folder by its real path, as the sandboxes see it.
+ */
+export function placesFor(o: { folder: string; scratch: Places["scratch"]; agentHomes: string[]; path: string; readable?: string[]; hidden: string[] }): Places {
   const home = canonical(os.homedir())
   return {
     folder: canonical(o.folder),
@@ -241,7 +296,7 @@ export function placesFor(o: { folder: string; scratch: Places["scratch"]; agent
     temps: systemTemps(),
     home,
     agentHomes: o.agentHomes.map(canonical),
-    tools: homeTools(process.env.PATH ?? "", home),
+    tools: homeTools(o.path, home),
     readable: (o.readable ?? []).map(canonical),
     hidden: o.hidden,
   }

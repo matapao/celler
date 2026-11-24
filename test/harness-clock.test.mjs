@@ -3,6 +3,7 @@ import test from "node:test"
 import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { CreateTaskResultSchema } from "@modelcontextprotocol/sdk/types.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { AgentRuntime } from "celler/harness"
 import { harnessLimits } from "../dist/limits.js"
@@ -101,7 +102,7 @@ const working = work => ({ ...fakeClaude(), run: async turn => {
   const ask = async () => (await turn.ask({ call: "t1", tool: "Bash", title: "Run the tests", options: [] }, turn.signal))?.option ?? null
   const spend = ms => delay(ms, undefined, stopped)
   try {
-    return { ok: true, text: await work({ call, ask, spend, transport }), usage: {}, costUsd: null, permissionDenials: [] }
+    return { ok: true, text: await work({ call, ask, spend, transport, client }), usage: {}, costUsd: null, permissionDenials: [] }
   } catch (err) {
     return { ok: false, text: "", usage: {}, costUsd: null, permissionDenials: [], error: err.message }
   } finally {
@@ -260,6 +261,42 @@ test("a call whose agent goes before its answer is cut off as a withdrawn one is
     assert.deepEqual([heard, result.isError, result.structuredContent.error], [["MCP error -32000: Connection closed"], true, "Timed out after 0 s"])
     assert.equal(app.human.inbox("office")[0].state, "pending")
     assert.deepEqual(app.history("office", run).map(e => e.kind), ["started", "call", "cancelled", "ended"])
+  } finally {
+    await platform.close()
+  }
+}))
+
+test("a call made as a task doesn't stop its run's clock while it waits in the inbox: its agent goes on meanwhile, and its time runs out", () => inFolder(async dir => {
+  const agent = working(async ({ client, spend }) => {
+    await client.request({ method: "tools/call", params: { name: "send", arguments: { text: "hi" }, task: {} } }, CreateTaskResultSchema)
+    await spend(600)
+    return "Done"
+  })
+  const { platform, app } = desk(() => new AgentRuntime(agent, host), { spec: within(300) }, new Map([["outbox", outbox]]))
+  try {
+    const started = app.start({ owner: "office", revision: app.publish(office), entry: "desk", workspace: dir, input: "Send it" })
+    await pendingIn(app)
+    const result = await started
+    assert.deepEqual([result.isError, result.structuredContent.error], [true, "Timed out after 0 s"])
+  } finally {
+    await platform.close()
+  }
+}))
+
+test("a run that withdraws its call to a run it delegated gets its clock back, though that run still waits in the inbox", () => inFolder(async dir => {
+  const heard = []
+  // The desk's own limit on its call to the clerk ends it, longer than the desk may take; then it works on for longer
+  // than it had left. The clerk's call waits in the inbox all along.
+  const deskAgent = working(async ({ call, spend }) => {
+    heard.push(await call("ask_clerk", { timeout: 450 }).catch(err => err.message))
+    await spend(600)
+    return "Done"
+  })
+  const clerk = working(({ call }) => call("send"))
+  const { platform, app } = desk(run => new AgentRuntime(run.parent ? clerk : deskAgent, host), { spec: within(300) }, new Map([["outbox", outbox]]))
+  try {
+    const result = await app.start({ owner: "office", revision: app.publish(office), entry: "desk", workspace: dir, input: "Ask the clerk" })
+    assert.deepEqual([heard, result.isError, result.structuredContent.error], [["MCP error -32001: Request timed out"], true, "Timed out after 0 s"])
   } finally {
     await platform.close()
   }

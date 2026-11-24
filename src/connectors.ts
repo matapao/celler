@@ -64,22 +64,35 @@ export function postJson(
   if (url.username || url.password) fail("INVALID_CONFIG", "Endpoint must not embed credentials")
   const { timeoutMs, maxResponseBytes } = withLimits(postLimits, options)
 
-  function verify(_run: Run, write: Write) {
+  function matches(write: Write) {
     if (write.account !== account || write.destination !== endpoint || write.operation !== "POST" || write.files.length) {
       fail("DENIED", "Approved packet no longer matches the adapter")
     }
   }
 
+  /** The token to send with, or a refusal: printable ASCII only, which every header carries as it is. */
+  async function bearer(): Promise<string> {
+    const secret = await token()
+    if (typeof secret !== "string" || !/^[\x21-\x7e]+$/.test(secret)) fail("DELIVERY_FAILED", "Invalid authorization token")
+    return secret
+  }
+
+  // The token each approved packet is sent with, had as it is verified: one that can't be had keeps the approval
+  // pending, as nothing was sent.
+  const tokens = new WeakMap<Write, string>()
+
   return {
     prepare: async (_run, args) => ({
       account, destination: endpoint, operation: "POST", content: normalizeJson(args), files: [],
     }),
-    verify,
-    async send(run, write, key, signal) {
-      verify(run, write)
-      const secret = await token()
-      // Printable ASCII only, which every header carries as it is: nothing in a token can become a header of its own.
-      if (typeof secret !== "string" || !/^[\x21-\x7e]+$/.test(secret)) fail("DELIVERY_FAILED", "Invalid authorization token")
+    async verify(_run, write) {
+      matches(write)
+      tokens.set(write, await bearer())
+    },
+    async send(_run, write, key, signal) {
+      matches(write)
+      const secret = tokens.get(write) ?? (await bearer())
+      tokens.delete(write)
       const timeout = AbortSignal.timeout(timeoutMs)
       const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
       const response = await fetch(endpoint, {
@@ -93,8 +106,14 @@ export function postJson(
         void response.body?.cancel().catch(() => {}) // unread, it would hold its connection
         fail("DELIVERY_FAILED", "Delivery outcome needs checking: " + response.status)
       }
-      // It arrived: an answer too large to keep fails the call, never the delivery, which is recorded as sent.
-      const body = await readBoundedText(response, maxResponseBytes)
+      // It arrived: an answer too large to keep, or cut off as it is read, fails the call, never the delivery, which is
+      // recorded as sent.
+      let body: string | undefined
+      try {
+        body = await readBoundedText(response, maxResponseBytes)
+      } catch {
+        return { isError: true, content: [{ type: "text", text: "Delivered, but its response could not be read" }] }
+      }
       if (body === undefined) {
         return { isError: true, content: [{ type: "text", text: "Delivered, but its response exceeds the byte limit" }] }
       }

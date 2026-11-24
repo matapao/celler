@@ -43,33 +43,35 @@ test("each agent's oldest program that runs is the one its installed SDK is made
   assert.equal(agentVersions.codex, sdk("@openai/codex-sdk").dependencies["@openai/codex"])
 })
 
-test("a run starts only an agent's program new enough to run, with no health check before it, and asks its version again once it changes", () => inFolder(async dir => {
+test("a run starts only an agent's program new enough to run, with no health check before it: one too old is asked again each run, as an update behind a shim leaves its file as it was", () => inFolder(async dir => {
   const program = path.join(dir, "claude")
+  const version = path.join(dir, "version")
   const asked = path.join(dir, "asked.log")
   const started = path.join(dir, "started.log")
-  // A program that says its version, and otherwise only that it was started.
-  const says = version => {
-    writeFileSync(program, [
-      "#!/usr/bin/env node",
-      'const fs = require("node:fs")',
-      `if (process.argv[2] === "--version") fs.appendFileSync(${JSON.stringify(asked)}, "${version}\\n"), console.log("${version} (Claude Code)")`,
-      `else fs.appendFileSync(${JSON.stringify(started)}, "started\\n")`,
-    ].join("\n"))
-    chmodSync(program, 0o755)
-  }
-  says("2.1.30")
+  // A shim, which says the version of the program it leads to, and otherwise only that it was started.
+  writeFileSync(program, [
+    "#!/usr/bin/env node",
+    'const fs = require("node:fs")',
+    `const version = fs.readFileSync(${JSON.stringify(version)}, "utf8")`,
+    `if (process.argv[2] === "--version") fs.appendFileSync(${JSON.stringify(asked)}, version + "\\n"), console.log(version + " (Claude Code)")`,
+    `else fs.appendFileSync(${JSON.stringify(started)}, "started\\n")`,
+  ].join("\n"))
+  chmodSync(program, 0o755)
+  writeFileSync(version, "2.1.30")
   const runtime = new AgentRuntime(claudeAgent({ claude: () => program, words: claudeWords }), host)
   for (let i = 0; i < 2; i++) {
     const old = await runtime.run(spec({ cwd: dir }), () => undefined).done
     assert.deepEqual([old.ok, old.runtimeDown, old.error], [false, true, `Claude Code 2.1.30 is older than ${agentVersions.claude}, the oldest that runs here: update it.`])
   }
-  // Asked once, never started.
-  assert.deepEqual([readFileSync(asked, "utf8"), existsSync(started)], ["2.1.30\n", false])
-  // Updated, it is asked again, and started.
-  says(agentVersions.claude)
-  const updated = await runtime.run(spec({ cwd: dir }), () => undefined).done
-  assert.equal(updated.runtimeDown, false)
-  assert.deepEqual([readFileSync(asked, "utf8"), existsSync(started)], [`2.1.30\n${agentVersions.claude}\n`, true])
+  // Asked each time, never started.
+  assert.deepEqual([readFileSync(asked, "utf8"), existsSync(started)], ["2.1.30\n2.1.30\n", false])
+  // Updated behind the shim, whose file is as it was: asked again, and started; from then on, known.
+  writeFileSync(version, agentVersions.claude)
+  for (let i = 0; i < 2; i++) {
+    const updated = await runtime.run(spec({ cwd: dir }), () => undefined).done
+    assert.equal(updated.runtimeDown, false)
+  }
+  assert.deepEqual([readFileSync(asked, "utf8"), existsSync(started)], [`2.1.30\n2.1.30\n${agentVersions.claude}\n`, true])
   // Its version known, as after a health check, its agent starts as its run does: its process is there at once.
   const known = new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: path.join(dir, "agent.jsonl") }), host)
   await known.health(false)

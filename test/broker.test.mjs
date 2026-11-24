@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
 import { createApp, createBroker } from "celler"
-import { cell, memoryDatabase, request, text } from "./support.mjs"
+import { cell, memoryDatabase, request, text, withClient } from "./support.mjs"
 
 test("a host broker receives the workspace and can use MCP over its own pipe", async t => {
   const database = memoryDatabase(t)
@@ -130,4 +130,25 @@ test("a broker that answers with something other than a tool result fails in cel
     await assert.rejects(adapters.get("fs.read").call(run, { path: "x" }, AbortSignal.timeout(5000)),
       error => error.name === "CellerError" && error.code === "BROKER_ERROR" && error.message.startsWith("Broker result"))
   }
+})
+
+test("fs.write takes base64 of any size the inline limit takes, checked whole: one cut short is refused before the broker starts", async t => {
+  const script = `
+    import { readFileSync } from "node:fs";
+    const input = JSON.parse(readFileSync(0, "utf8"));
+    process.stdout.write(JSON.stringify({ content: [{ type: "text", text: String(Buffer.from(input.args.base64, "base64").length) }] }));
+  `
+  const { adapters, workspaceNodes } = createBroker({ executable: process.execPath, args: ["-e", script] }, () => true)
+  const big = Buffer.alloc(4 * 1024 * 1024, 1).toString("base64")
+  // Called by an agent, through the tool's schema, whose pattern doesn't run out of stack on a large file.
+  const app = createApp({ database: memoryDatabase(t), adapters, platform: {
+    allowed: () => true,
+    launch: (_spec, connect) => withClient(connect, async client => {
+      assert.deepEqual(await client.callTool({ name: "fs.write", arguments: { path: "big.bin", base64: big } }), text(String(4 * 1024 * 1024)))
+      return text("done")
+    }),
+  } })
+  assert.deepEqual(await app.start(request(app.publish([cell("root", ["files"]), ...workspaceNodes]))), text("done"))
+  const run = { id: "r1", owner: "alice", revision: "rev", entry: "root", workspace: "ws", parent: null }
+  await assert.rejects(adapters.get("fs.write").call(run, { path: "cut.bin", base64: "eA=" }, AbortSignal.timeout(5_000)), err => err.code === "INVALID_ARGS" && /multiple of 4/.test(err.message))
 })

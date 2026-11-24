@@ -3,7 +3,7 @@ import { z } from "zod"
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import { createCalls } from "./calls.js"
-import { compileGraph, createSchemas, type Cell } from "./catalog.js"
+import { compileGraph, createSchemas, type Cell, type Graph } from "./catalog.js"
 import { fail, parseWith } from "./errors.js"
 import { appLimits, withLimits } from "./limits.js"
 import { createRuns } from "./runs.js"
@@ -34,10 +34,12 @@ export type Platform = {
     connect: (transport: Transport, nativeDiscovery?: boolean) => Promise<void>,
     signal: AbortSignal): Promise<CallToolResult>
   /**
-   * One of the run's calls waits for a person's decision in the inbox, until the release it returns. A platform whose
-   * runs keep a clock stops it meanwhile: the person's time isn't the run's.
+   * The run's agent waits on one of its calls, until the release it returns: for a person's decision in the inbox, or,
+   * with `on`, for the run by that id that it delegated, which may itself wait for one. A platform whose runs keep a
+   * clock stops it while the run waits for the person, itself or through a run it waits on: the person's time isn't the
+   * run's. A call made as a task is waited on by no one.
    */
-  waiting?(run: Run): () => void
+  waiting?(run: Run, on?: string): () => void
 }
 
 export type Start = Pick<Run, "owner" | "revision" | "entry" | "workspace"> & { input: unknown }
@@ -47,6 +49,18 @@ export type AppOptions = {
   /** The host's adapters by id, read live: the host may add one for tools it publishes later. */
   adapters: ReadonlyMap<string, Adapter>
 } & Partial<typeof appLimits>
+
+/**
+ * What a run collects of a delivery the host confirmed without its answer: that it was delivered; as an error for a tool
+ * that declares its output, which a confirmation can't give.
+ */
+function confirmedBy(current: Graph, tool: string): CallToolResult {
+  const node = current.get(tool)
+  if (node.kind === "tool" && node.definition.outputSchema) {
+    return { isError: true, content: [{ type: "text", text: "Delivered (confirmed by the host), but what it answered isn't known" }] }
+  }
+  return { content: [{ type: "text", text: "Delivered (confirmed by the host)" }] }
+}
 
 const startRequest = z.strictObject({
   owner: z.string().min(1), revision: z.string().min(1), entry: z.string().min(1), workspace: z.string().min(1),
@@ -98,14 +112,15 @@ export function createApp(options: AppOptions) {
       decline: store.decline,
       /**
        * Settles an `unknown` delivery after the host has checked the destination. What a run collects of one sent passes
-       * the checks a delivery's own answer does, so for a tool with an outputSchema the host gives that result.
+       * the checks a delivery's own answer does, so for a tool with an outputSchema the host gives that result; without
+       * it, the run hears that it was delivered, as an error, since what it answered isn't known.
        */
       reconcile(owner: string, id: string, outcome: "sent" | "failed", result?: CallToolResult) {
         let value: CallToolResult | undefined
         if (outcome === "sent") {
           const { run, tool } = store.review(owner, id)
-          const confirmed: CallToolResult = { content: [{ type: "text", text: "Delivered (confirmed by the host)" }] }
-          value = runs.checkedResult(runs.graph(run.revision), tool, result ?? confirmed)
+          const current = runs.graph(run.revision)
+          value = runs.checkedResult(current, tool, result ?? confirmedBy(current, tool))
         }
         store.reconcile(owner, id, outcome, value)
       },

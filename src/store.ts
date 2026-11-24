@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite"
 import { z } from "zod"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 import { fail } from "./errors.js"
-import { canonicalJson, normalizeJson } from "./json.js"
+import { canonicalJson, hash, normalizeJson } from "./json.js"
 
 export type Run = Readonly<{
   id: string
@@ -118,9 +118,10 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
     "WHERE a.owner=? AND a.state IN ('pending','started','unknown') ORDER BY a.rowid",
   )
   const selectReceipt = db.prepare("SELECT tool,args FROM approvals WHERE owner=? AND id=?")
+  // What waits in an owner's inbox: not a cancelled run's, which can only be declined and is never sent.
   const selectPendingUsage = db.prepare(
-    "SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(CAST(packet AS BLOB))), 0) AS bytes " +
-    "FROM approvals WHERE owner=? AND state='pending'",
+    "SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(CAST(a.packet AS BLOB))), 0) AS bytes " +
+    "FROM approvals a JOIN runs r ON r.id=a.run WHERE a.owner=? AND a.state='pending' AND r.status<>'cancelled'",
   )
   const insertApproval = db.prepare(
     "INSERT INTO approvals(id,owner,run,tool,args,packet,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",
@@ -203,6 +204,26 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
   }
   function approvalId(run: Run, key: string) {
     return createHash("sha256").update(JSON.stringify([run.id, key])).digest("hex")
+  }
+  /**
+   * The key of a call its client gave no key of its own (`celler/call-id`), from its tool and arguments (`base`): that
+   * of the approval it joins while that one is still open, as a blind retry does; once it is settled, the next of the
+   * same call's, so the same call made again is made again, and a retry of that one joins it. A run that has ended
+   * collects what the last one it staged came to.
+   */
+  function callKey(run: Run, base: string): string {
+    const settled = (key: string) => {
+      const state = selectProgress.get(run.owner, approvalId(run, key))?.state
+      return state === "sent" || state === "declined" || state === "failed"
+    }
+    const over = ended(run.id)
+    let key = base
+    for (let n = 1; settled(key); n++) {
+      const next = hash([base, n])
+      if (over && !selectProgress.get(run.owner, approvalId(run, next))) return key
+      key = next
+    }
+    return key
   }
   function existingApproval(run: Run, key: string, tool: string, args: unknown) {
     const id = approvalId(run, key)
@@ -401,7 +422,7 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
     inbox,
     /** The runs a run delegated, whatever process started them. */
     children: (id: string) => selectChildren.all(id).map(row => String(row.id)),
-    decline, reconcile, ended, finishRun, loadRun, record, existingApproval, stage, result, review, approve,
+    decline, reconcile, ended, finishRun, loadRun, record, callKey, existingApproval, stage, result, review, approve,
   }
 }
 

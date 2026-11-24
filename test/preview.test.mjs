@@ -80,10 +80,16 @@ test("preview escapes BiDi spoofing, shows attachment names as they are sent, sa
   assert.deepEqual(decided, ["a1", "approve"])
   assert.equal(status.textContent, "Submitted")
 
-  // Cancelled runs do not render approval controls.
-  showApproval(root, { id: "a2", state: "pending", tool: "send", runStatus: "cancelled", write }, async () => {})
-  assert.equal(root.children.some(c => c.tag === "fieldset"), false)
+  // A cancelled run's can't be sent, only declined, which takes it out of the inbox.
+  let declined
+  showApproval(root, { id: "a2", state: "pending", tool: "send", runStatus: "cancelled", write }, async (id, d) => {
+    declined = [id, d]
+  })
   assert.ok(root.children[2].textContent.includes("run: cancelled"))
+  const controls = root.children.find(c => c.tag === "fieldset")
+  assert.deepEqual(controls.children.map(button => button.textContent), ["decline"])
+  await controls.children[0].onclick()
+  assert.deepEqual([declined, root.children[2].textContent], [["a2", "decline"], "Declined"])
 
   // Characters a reviewer could not see are escaped, long space runs are counted out, and lines wrap.
   const hidden = "Lunch at 12." + " ".repeat(160) + "P.S. wire\u200B the\u00A0balance\u{E0061}\u2028now"
@@ -156,4 +162,18 @@ test("a view taken out of the page frees its files' object URLs at the next rend
   showWrite(second, { ...plainWrite, files: [file("c.txt")] })
   assert.ok(urls.revoked.includes(ofFirst) && urls.revoked.includes(ofSecond))
   assert.ok(!urls.revoked.includes(ofThird) && !urls.revoked.includes(urls.created[3]))
+})
+
+test("a file's name of any length is made plain at once, and an attachment of many megabytes is shown", t => {
+  const { root } = withDom(t)
+  const started = Date.now()
+  showWrite(root, { ...plainWrite, files: [file(" ".repeat(200_000) + "x" + ".".repeat(200_000)), file("a" + " ".repeat(300) + "b")] })
+  assert.ok(Date.now() - started < 1_000, `${Date.now() - started} ms`)
+  // Cut to a name's length, then trimmed: no space or dot at either end.
+  assert.deepEqual(root.children.slice(1).map(line => line.children[0].download), ["x", "a" + " ".repeat(254)].map(name => name.trimEnd()))
+  const big = Buffer.alloc(4 * 1024 * 1024, 7).toString("base64")
+  showWrite(root, { ...plainWrite, files: [{ name: "big.bin", mediaType: "application/octet-stream", base64: big }] })
+  assert.equal(root.children[1].children[0].textContent, "big.bin (application/octet-stream, 4.0 MB)")
+  // Base64 is checked whole: a length that isn't a multiple of four, or padding inside it, isn't base64.
+  for (const base64 of ["eA=", "eA==eA==", "e==="]) assert.throws(() => showWrite(root, { ...plainWrite, files: [{ ...file("x"), base64 }] }), /Invalid base64/, base64)
 })

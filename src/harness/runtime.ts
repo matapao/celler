@@ -91,14 +91,17 @@ function fileOf(program: string): string | null {
   }
 }
 
-/** What a program says its version is, or null: known at once once it has said it, until its file changes. */
-function versionOf(program: string, env: NodeJS.ProcessEnv): string | Promise<string | null> {
+/**
+ * What a program says its version is, or null: known at once once it has said one that runs (no older than `oldest`),
+ * until its file changes. One too old is asked again each time: behind a shim, an update leaves the file as it was.
+ */
+function versionOf(program: string, env: NodeJS.ProcessEnv, oldest: string): string | Promise<string | null> {
   const file = fileOf(program)
   const known = file ? versions.get(file) : undefined
   if (known) return known
   return runForOutput(program, ["--version"], env).then((said) => {
     const version = said ? versionIn(said) : null
-    if (file && version) versions.set(file, version)
+    if (file && version && !older(version, oldest)) versions.set(file, version)
     return version
   })
 }
@@ -183,16 +186,24 @@ export class AgentRuntime implements Runtime {
     this.nativeDiscovery = agent.nativeDiscovery
   }
 
-  /** Found, new enough (as each run checks too), signed in; with `deep`, a tiny test run too. */
+  /** Found, new enough (as each run checks too), signed in; with `deep`, a tiny test run too. It never throws. */
   async health(deep: boolean): Promise<RuntimeHealth> {
-    const { agent } = this
     const checkedAt = Date.now()
+    try {
+      return await this.check(deep, checkedAt)
+    } catch (err) {
+      return { ok: false, checkedAt, detail: `${this.agent.name} could not be checked: ${errorText(err).slice(0, L.errorChars)}` }
+    }
+  }
+
+  private async check(deep: boolean, checkedAt: number): Promise<RuntimeHealth> {
+    const { agent } = this
     const found = agent.find()
     if (typeof found !== "string") return { ok: false, checkedAt, detail: found.missing, fix: "find" }
     agent.ready?.()
     const { program } = agent.started(found)
     const env = agentEnv(agent.env(this.host), this.host)
-    const [version, answer] = await Promise.all([versionOf(program, env), runForOutput(program, agent.signedIn.args, env, agent.signedIn.anyExit)])
+    const [version, answer] = await Promise.all([versionOf(program, env, agent.oldest), runForOutput(program, agent.signedIn.args, env, agent.signedIn.anyExit)])
     const unfit = unfitVersion(agent, found, version)
     if (unfit) return { ok: false, checkedAt, program: found, detail: unfit }
     const named = `${agent.name} ${version}`
@@ -211,12 +222,16 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  /** Starts the agent's own sign-in, or says why it can't. */
+  /** Starts the agent's own sign-in, or says why it can't. It never throws. */
   login(): AgentLogin | { error: string } {
-    const found = this.agent.find()
-    if (typeof found !== "string") return { error: found.missing }
-    this.agent.ready?.()
-    return startLogin(this.agent.started(found).program, this.agent.login.args, agentEnv(this.agent.env(this.host), this.host))
+    try {
+      const found = this.agent.find()
+      if (typeof found !== "string") return { error: found.missing }
+      this.agent.ready?.()
+      return startLogin(this.agent.started(found).program, this.agent.login.args, agentEnv(this.agent.env(this.host), this.host))
+    } catch (err) {
+      return { error: `${this.agent.name}'s sign-in could not start: ${errorText(err).slice(0, L.errorChars)}` }
+    }
   }
 
   run(spec: RunSpec, onProgress: (p: RunProgress) => void): RunHandle {
@@ -243,10 +258,12 @@ export class AgentRuntime implements Runtime {
       if (unfit) return failedRun(unfit)
       // Its own scratch folder inside its folder, removed when it ends, and where its commands may go (sandbox/places.ts).
       scratch = scratchFor(spec.cwd)
-      places = placesFor({ folder: spec.cwd, scratch, agentHomes, readable: spec.readable, hidden: PROXIES.filter((name) => process.env[name] !== undefined) })
-      // Its own user's environment, marked as the host's run, with the folders its program needs on PATH; and the one its
-      // own errands start in (its version).
-      env = runEnv(started.path.length ? { ...own, PATH: [...started.path, process.env.PATH ?? ""].join(path.delimiter) } : own, this.host, places)
+      // The folders its program needs on PATH, then the person's: its programs' folders in the home are read again.
+      const runPath = [...started.path, process.env.PATH ?? ""].join(path.delimiter)
+      places = placesFor({ folder: spec.cwd, scratch, agentHomes, path: runPath, readable: spec.readable, hidden: PROXIES.filter((name) => process.env[name] !== undefined) })
+      // Its own user's environment, marked as the host's run, on that PATH; and the one its own errands start in (its
+      // version).
+      env = runEnv({ ...own, PATH: runPath }, this.host, places)
       errands = agentEnv(own, this.host)
     } catch (err) {
       // What was made for it goes with it.
@@ -303,13 +320,15 @@ export class AgentRuntime implements Runtime {
     const children: { child: ChildProcess; exited: Promise<void> }[] = []
     let stderr = ""
     const spawnAgent: Turn["spawn"] = (command, args, o) => {
-      const child = spawn(command, args, { cwd: o.cwd, env: o.env, signal: o.signal, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, detached: !isWin })
-      child.stderr.setEncoding("utf8").on("data", (c: string) => (stderr = (stderr + c).slice(-L.stderrChars)))
-      // An answer to one that has gone finds no one there: that ends nothing else.
-      child.stdin.on("error", () => undefined)
+      // Its streams, however its type has them: one that couldn't start (no file descriptor left) comes without them.
+      const child: ChildProcess = spawn(command, args, { cwd: o.cwd, env: o.env, signal: o.signal, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, detached: !isWin })
+      // First, as nothing else may be: that one says why only here. Its SDK then fails the run; the host goes on.
       child.on("error", () => undefined)
+      child.stderr?.setEncoding("utf8").on("data", (c: string) => (stderr = (stderr + c).slice(-L.stderrChars)))
+      // An answer to one that has gone finds no one there: that ends nothing else.
+      child.stdin?.on("error", () => undefined)
       children.push({ child, exited: new Promise((resolve) => child.once("exit", () => resolve())) })
-      return child
+      return child as ChildProcessWithoutNullStreams
     }
     // Asked to end its turn (its session stays resumable), and what it started stopped if it doesn't end in its grace.
     let ended = false
@@ -346,6 +365,15 @@ export class AgentRuntime implements Runtime {
       return r
     }
     arm()
+    // Once its agent has started, its first process with it (its SDK starts it as it is called), or once it won't.
+    let markStarted: () => void = () => undefined
+    const agentStarted = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    let markCleaned: () => void = () => undefined
+    const cleaned = new Promise<void>((resolve) => {
+      markCleaned = resolve
+    })
     // Never a program older than its SDK is made with. Each program is asked once, and again once it changes: known, as
     // after a health check, its agent starts as the run does.
     const begin = (version: string | null): Promise<RunResult> => {
@@ -353,12 +381,17 @@ export class AgentRuntime implements Runtime {
       if (unfit) return Promise.resolve(failure(unfit, true))
       // Stopped while it was asked: it doesn't start (end says why).
       if (over()) return Promise.resolve(failure(""))
-      return agent.run(turn)
+      try {
+        return agent.run(turn)
+      } finally {
+        markStarted()
+      }
     }
-    const version = versionOf(started.program, errands)
+    const version = versionOf(started.program, errands, agent.oldest)
     const done = (typeof version === "string" ? begin(version) : version.then(begin))
       .then(end, (err: unknown) => end(failure(errorText(err).slice(0, L.errorChars))))
       .finally(() => {
+        markStarted()
         ended = true
         clearTimeout(timer)
         asking.abort()
@@ -372,14 +405,18 @@ export class AgentRuntime implements Runtime {
           })
         }
         // Its scratch goes once its processes have exited, or their grace is over: none writes in it as it goes.
-        void withinGrace(children.map(({ exited }) => exited)).then(() => removeScratch(places.scratch))
+        void withinGrace(children.map(({ exited }) => exited))
+          .then(() => removeScratch(places.scratch))
+          .finally(markCleaned)
       })
     return {
-      // Its first process's, once started: Claude Code's as the run starts; Codex's SDK keeps its own to itself.
+      // Its first process's, once started: Claude Code's as its agent starts; Codex's SDK keeps its own to itself.
       get pid() {
         return children[0]?.child.pid
       },
+      started: agentStarted,
       done,
+      cleaned,
       cancel: () => stop("cancelled"),
       hold,
     }
@@ -395,22 +432,29 @@ const LOGIN_URL =/https:\/\/[^\s\x00-\x1f\x7f"'`)\]}>]+(?=[\s\x00-\x1f\x7f"'`)\]
 
 /** An agent's own sign-in: it opens the browser and prints the page's address; a code the page shows goes to its input. */
 function startLogin(program: string, args: string[], env: NodeJS.ProcessEnv): AgentLogin {
-  const child = spawn(program, args, { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, detached: !isWin })
+  const child: ChildProcess = spawn(program, args, { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, detached: !isWin })
+  // First, as nothing else may be: one that couldn't start comes without its streams, and says why only here.
+  let failed: (err: Error) => void = () => undefined
+  child.on("error", (err) => failed(err))
   const said = { stdout: "", stderr: "" }
   let gotUrl: (u: string | null) => void = () => undefined
   const url = new Promise<string | null>((resolve) => (gotUrl = resolve))
   // Its page's address on either of its outputs: an agent may print it on its error output.
   for (const output of ["stdout", "stderr"] as const) {
-    child[output].on("data", (c: Buffer) => {
+    child[output]?.on("data", (c: Buffer) => {
       said[output] = (said[output] + c.toString("utf8")).slice(-L.stderrChars)
       const m = LOGIN_URL.exec(said[output])
       if (m) gotUrl(m[0])
     })
   }
-  child.stdin.on("error", () => undefined)
+  child.stdin?.on("error", () => undefined)
   const timer = setTimeout(() => killTree(child), L.loginMs)
   const done = new Promise<{ ok: boolean; error?: string }>((resolve) => {
-    child.on("error", (err) => resolve({ ok: false, error: err.message }))
+    failed = (err) => {
+      clearTimeout(timer)
+      gotUrl(null)
+      resolve({ ok: false, error: err.message })
+    }
     child.on("close", (code) => {
       clearTimeout(timer)
       gotUrl(null)
@@ -418,5 +462,5 @@ function startLogin(program: string, args: string[], env: NodeJS.ProcessEnv): Ag
       resolve(code === 0 ? { ok: true } : { ok: false, error: last(said.stderr) ?? last(said.stdout) ?? `Login ended with code ${code}` })
     })
   })
-  return { url, done, sendCode: (code) => void child.stdin.write(`${code.trim()}\n`), cancel: () => killTree(child) }
+  return { url, done, sendCode: (code) => void child.stdin?.write(`${code.trim()}\n`), cancel: () => killTree(child) }
 }

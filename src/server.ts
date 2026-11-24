@@ -1,13 +1,14 @@
-import { InMemoryTaskStore } from "@modelcontextprotocol/sdk/experimental/tasks/stores/in-memory.js"
+import { randomBytes } from "node:crypto"
+import { isTerminal, type CreateTaskOptions, type TaskStore } from "@modelcontextprotocol/sdk/experimental/tasks/interfaces.js"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js"
-import type { CallToolResult, Task, Tool } from "@modelcontextprotocol/sdk/types.js"
+import type { CallToolResult, Request, RequestId, Result, Task, Tool } from "@modelcontextprotocol/sdk/types.js"
 import type { Calls } from "./calls.js"
 import { createDiscovery, invocation, invokeTool } from "./discovery.js"
 import { fail, parseWith, CellerError } from "./errors.js"
 import { hash } from "./json.js"
-import type { appLimits } from "./limits.js"
+import { taskListing, type appLimits } from "./limits.js"
 import type { Runs } from "./runs.js"
 import type { Run, Store } from "./store.js"
 
@@ -29,12 +30,77 @@ function refusal(error: unknown): CallToolResult {
   return { isError: true, content: [{ type: "text", text }] }
 }
 
-// The SDK reports tasks/cancel only as a status change, so this is where a cancelled task's work stops.
-class TaskWork extends InMemoryTaskStore {
+/**
+ * A connection's tasks, as MCP's task store keeps them: each kept while it works, however long a person takes, and for
+ * its ttl once it has ended, as the SDK's CreateTaskOptions say. Its work, by task, is what tasks/cancel stops: the SDK
+ * reports a cancel only as a status change.
+ */
+class TaskWork implements TaskStore {
   readonly work = new Map<string, AbortController>()
-  override async updateTaskStatus(taskId: string, status: Task["status"], message?: string, sessionId?: string) {
+  private kept = new Map<string, { task: Task; result?: Result; sessionId?: string; timer?: NodeJS.Timeout }>()
+
+  /** A task its session may see: none of another session's. */
+  private find(taskId: string, sessionId?: string) {
+    const kept = this.kept.get(taskId)
+    if (!kept || (sessionId !== undefined && kept.sessionId !== undefined && kept.sessionId !== sessionId)) return undefined
+    return kept
+  }
+  private found(taskId: string, sessionId?: string) {
+    const kept = this.find(taskId, sessionId)
+    if (!kept) throw new Error(`Task ${taskId} not found`)
+    return kept
+  }
+
+  /** Its new status, once: an ended task's stays. Kept for its ttl from its end. */
+  private settle(taskId: string, status: Task["status"], sessionId?: string, message?: string) {
+    const kept = this.found(taskId, sessionId)
+    if (isTerminal(kept.task.status)) throw new Error(`Task ${taskId} has ended already`)
+    kept.task = { ...kept.task, status, lastUpdatedAt: new Date().toISOString(), ...(message ? { statusMessage: message } : {}) }
+    if (isTerminal(status) && kept.task.ttl !== null) {
+      kept.timer = setTimeout(() => this.kept.delete(taskId), kept.task.ttl)
+      kept.timer.unref()
+    }
+    return kept
+  }
+
+  async createTask(options: CreateTaskOptions, _requestId: RequestId, _request: Request, sessionId?: string) {
+    const now = new Date().toISOString()
+    const task: Task = { taskId: randomBytes(16).toString("hex"), status: "working", ttl: options.ttl ?? null, createdAt: now, lastUpdatedAt: now, pollInterval: options.pollInterval ?? taskListing.pollMs }
+    this.kept.set(task.taskId, { task, sessionId })
+    return { ...task }
+  }
+  async getTask(taskId: string, sessionId?: string) {
+    const kept = this.find(taskId, sessionId)
+    return kept ? { ...kept.task } : null
+  }
+  async storeTaskResult(taskId: string, status: "completed" | "failed", result: Result, sessionId?: string) {
+    this.settle(taskId, status, sessionId).result = result
+  }
+  async getTaskResult(taskId: string, sessionId?: string) {
+    const { result } = this.found(taskId, sessionId)
+    if (!result) throw new Error(`Task ${taskId} has no result yet`)
+    return result
+  }
+  async updateTaskStatus(taskId: string, status: Task["status"], message?: string, sessionId?: string) {
+    this.settle(taskId, status, sessionId, message)
     if (status === "cancelled") this.work.get(taskId)?.abort()
-    return super.updateTaskStatus(taskId, status, message, sessionId)
+  }
+  async listTasks(cursor?: string, sessionId?: string) {
+    const ids = [...this.kept.keys()].filter((id) => this.find(id, sessionId))
+    const start = cursor === undefined ? 0 : ids.indexOf(cursor) + 1
+    if (cursor !== undefined && start === 0) throw new Error(`Invalid cursor: ${cursor}`)
+    const page = ids.slice(start, start + taskListing.pageSize)
+    const tasks = page.flatMap((id) => {
+      const kept = this.kept.get(id)
+      return kept ? [{ ...kept.task }] : []
+    })
+    return start + taskListing.pageSize < ids.length ? { tasks, nextCursor: page.at(-1) } : { tasks }
+  }
+
+  /** Every task gone, and its timer with it: its connection has closed. */
+  cleanup() {
+    for (const { timer } of this.kept.values()) clearTimeout(timer)
+    this.kept.clear()
   }
 }
 
@@ -111,8 +177,8 @@ export function createServer(runs: Runs, call: Calls["call"], store: Store, limi
               ? parseWith(invocation, "invoke arguments", args)
               : { name: params.name, arguments: args }
             // Without `celler/call-id`, the tool and arguments are the key, so a blind retry joins the first call's
-            // approval or child run.
-            const key = callId ?? hash([request.name, request.arguments])
+            // approval or child run; the same call once its approval is settled is one of its own (store.callKey).
+            const key = callId ?? store.callKey(run, hash([request.name, request.arguments]))
             return await call(run, request.name, request.arguments, key, signal, { heartbeat, asTask: !!params.task })
           } catch (error) {
             // Cut off by its run's end, a call hears that, never what its adapter threw as it stopped.
@@ -130,8 +196,9 @@ export function createServer(runs: Runs, call: Calls["call"], store: Store, limi
           }).catch(() => {})
           return await respond(AbortSignal.any([extra.signal, connection.signal, ...owned]), heartbeat)
         }
-        // A connection holds only so many tasks, none kept longer than the app keeps one: MCP lets the receiver say.
-        if (tasks.getAllTasks().length >= limits.maxTasks) fail("LIMIT_EXCEEDED", "Too many tasks on this connection")
+        // A connection works on only so many tasks at once, none kept longer than the app keeps one: MCP lets the
+        // receiver say.
+        if (tasks.work.size >= limits.maxTasks) fail("LIMIT_EXCEEDED", "Too many tasks on this connection")
         const ttl = Math.min(params.task.ttl ?? limits.taskTtlMs, limits.taskTtlMs)
         const task = await extra.taskStore!.createTask({ ttl })
         const work = new AbortController()

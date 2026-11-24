@@ -70,3 +70,36 @@ test("a task is kept no longer than the app keeps one, whatever ttl its client a
   await delay(10)
   assert.deepEqual(warnings, [])
 })
+
+test("a connection's limit counts only the tasks still working, and a task is kept while it works, however long, then for its ttl", async t => {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const app = createApp({ database: memoryDatabase(t), maxTasks: 1, adapters: new Map([
+    ["slow", { call: async () => { await gate; return text("slow") } }],
+    ["quick", { call: async () => text("quick") }],
+  ]), platform: {
+    allowed: () => true,
+    launch: (_spec, connect) => withClient(connect, async client => {
+      const tasks = client.experimental.tasks
+      const asTask = (name, ttl) => client.request({ method: "tools/call", params: { name, arguments: {}, task: { ttl } } }, CreateTaskResultSchema)
+      // Ended tasks, kept for their ttl, don't count: one after another, each in turn.
+      for (let i = 0; i < 3; i++) {
+        const { task } = await asTask("quick", 5_000)
+        assert.deepEqual((await tasks.getTaskResult(task.taskId, CallToolResultSchema)).content, text("quick").content)
+      }
+      // A task that works for longer than its ttl is still there, and once it ends, for its ttl.
+      const slow = (await asTask("slow", 200)).task
+      await assert.rejects(asTask("quick", 5_000), /Too many tasks/)
+      await delay(300)
+      assert.equal((await tasks.getTask(slow.taskId)).status, "working")
+      release()
+      while ((await tasks.getTask(slow.taskId)).status === "working") await delay(5)
+      assert.deepEqual((await tasks.getTaskResult(slow.taskId, CallToolResultSchema)).content, text("slow").content)
+      await delay(300)
+      await assert.rejects(tasks.getTask(slow.taskId))
+      return text("done")
+    }),
+  } })
+  const revision = app.publish([cell("root", ["slow", "quick"]), tool("slow", { adapter: "slow" }), tool("quick", { adapter: "quick" })])
+  assert.deepEqual(await app.start(request(revision)), text("done"))
+})

@@ -20,9 +20,10 @@ export function createCalls(
   const activeCalls = new Map<string, number>() // run id → tool calls in flight
 
   async function execute(
-    run: Run, node: Binding, args: Args, key: string, signal: AbortSignal, heartbeat?: () => void,
+    run: Run, node: Binding, args: Args, key: string, signal: AbortSignal, o: { heartbeat?: () => void; asTask: boolean },
   ): Promise<unknown> {
-    if ("cell" in node.target) return runs.delegate(run, node.id, node.target.cell, args, key, signal, heartbeat)
+    const { heartbeat, asTask } = o
+    if ("cell" in node.target) return runs.delegate(run, node.id, node.target.cell, args, key, signal, o)
     const adapter = registry.get(node.target.adapter)
     if (!adapter) fail("UNAVAILABLE", "Adapter unavailable: " + node.target.adapter)
     if ("call" in adapter) return adapter.call(run, args, signal)
@@ -34,7 +35,8 @@ export function createCalls(
       return write
     }, signal)
     // The run waits for the person until they decide, or the call is withdrawn or cut off: that time isn't the run's.
-    const release = platform.waiting?.(run)
+    // Made as a task, the call waits, but its agent doesn't: it goes on with its work meanwhile.
+    const release = asTask ? undefined : platform.waiting?.(run)
     try {
       return await runs.waitFor(store.result(run.owner, approval, signal), signal, heartbeat)
     } finally {
@@ -72,7 +74,7 @@ export function createCalls(
 
       store.record(run.id, "call", { id, key })
       try {
-        const result = runs.checkedResult(current, id, await execute(run, node, args, key, signal, heartbeat))
+        const result = runs.checkedResult(current, id, await execute(run, node, args, key, signal, { heartbeat, asTask }))
         store.record(run.id, "returned", { id, key, error: result.isError ?? false })
         return result
       } catch (error) {

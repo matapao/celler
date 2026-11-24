@@ -176,7 +176,7 @@ test("a state change and its event are one: an event that can't be written leave
   await running
 })
 
-test("a delivery the host settles as unknown, then as sent, answers the way its tool says it does", async t => {
+test("a delivery the host settles as unknown, then as sent, answers the way its tool says it does, or that it was delivered", async t => {
   const database = memoryDatabase(t)
   let runId
   const app = createApp({ database, adapters: new Map([["delivery", {
@@ -186,8 +186,9 @@ test("a delivery the host settles as unknown, then as sent, answers the way its 
     allowed: () => true,
     launch: (spec, connect) => withClient(connect, async client => {
       runId = spec.id
-      use(client, "k1").catch(() => {})
-      await pending(app)
+      use(client, "k1", "first").catch(() => {})
+      use(client, "k2", "second").catch(() => {})
+      while (app.human.inbox("alice").filter(row => row.state === "pending").length < 2) await pending(app)
       return text("left for a person")
     }),
   } })
@@ -195,12 +196,18 @@ test("a delivery the host settles as unknown, then as sent, answers the way its 
     inputSchema: object({ message: { type: "string" } }), outputSchema: object({ id: { type: "string" } }),
   })])
   await app.start(request(revision))
-  const id = app.human.inbox("alice")[0].id
-  await assert.rejects(app.human.approve("alice", id), /connection reset/)
-  assert.throws(() => app.human.reconcile("alice", id, "sent"), /structured output/)
-  assert.equal(app.human.review("alice", id).state, "unknown")
-  app.human.reconcile("alice", id, "sent", { ...text("delivered"), structuredContent: { id: "42" } })
+  const [first, second] = app.human.inbox("alice").map(row => row.id)
+  for (const id of [first, second]) await assert.rejects(app.human.approve("alice", id), /connection reset/)
+  // A result that isn't what the tool says it answers is refused, and nothing changes.
+  assert.throws(() => app.human.reconcile("alice", first, "sent", text("delivered")), /structured output/)
+  assert.equal(app.human.review("alice", first).state, "unknown")
+  app.human.reconcile("alice", first, "sent", { ...text("delivered"), structuredContent: { id: "42" } })
+  // Confirmed without its answer: the run hears that it was delivered, and that what it answered isn't known.
+  app.human.reconcile("alice", second, "sent")
+  assert.equal(app.human.review("alice", second).state, "sent")
   await withClient(channel => app.reconnect("alice", runId, channel), async client => {
-    assert.deepEqual((await use(client, "k1")).structuredContent, { id: "42" })
+    assert.deepEqual((await use(client, "k1", "first")).structuredContent, { id: "42" })
+    const confirmed = await use(client, "k2", "second")
+    assert.deepEqual([confirmed.isError, confirmed.content[0].text], [true, "Delivered (confirmed by the host), but what it answered isn't known"])
   })
 })

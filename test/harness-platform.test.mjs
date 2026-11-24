@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import http from "node:http"
 import net from "node:net"
+import { existsSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { DatabaseSync } from "node:sqlite"
@@ -296,4 +297,37 @@ test("a cell's context reaches its agent as text, a resource's text too, and con
   } finally {
     await platform.close()
   }
+}))
+
+test("the host hears an agent's process as it starts, on the first run of a program whose version isn't known yet too", { skip: process.platform === "win32" }, () => inFolder(async dir => {
+  // A program at a path of its own, which no run has asked its version yet.
+  const program = path.join(dir, "claude")
+  writeFileSync(program, `#!/bin/sh\nexec "${process.execPath}" "${fakeClaudeProgram}" "$@"\n`, { mode: 0o755 })
+  const pids = []
+  const agent = { ...claudeAgent({ claude: () => program, words: claudeWords }), env: h => ({ ...claudeAgent({ claude: () => program, words: claudeWords }).env(h), FAKE_CLAUDE_LOG: path.join(dir, "agent.jsonl") }) }
+  const { platform, app, revision } = desk(() => new AgentRuntime(agent, host), { started: (_run, pid) => pids.push(pid), ask: async () => ({ option: "allow" }) })
+  try {
+    const result = await app.start({ owner: "office", revision, entry: "desk", workspace: dir, input: "Go" })
+    assert.equal(result.isError, false, JSON.stringify(result))
+    assert.equal(pids.length, 1)
+    assert.equal(typeof pids[0], "number")
+  } finally {
+    await platform.close()
+  }
+}))
+
+test("closing the platform settles once what its runs left is gone: their scratch and short folders", () => inFolder(async dir => {
+  const log = path.join(dir, "agent.jsonl")
+  // A run whose agent waits for the person, who never answers, when the platform closes.
+  let asked
+  const asking = new Promise(resolve => (asked = resolve))
+  const { platform, app, revision } = desk(() => new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: log }), host), { ask: () => (asked(), new Promise(() => undefined)) })
+  const started = app.start({ owner: "office", revision, entry: "desk", workspace: dir, input: "Go" })
+  await asking
+  const { allowRead } = sentTo(log).find(e => e.what === "started").data.settings.sandbox.filesystem
+  const short = allowRead[1]
+  assert.deepEqual([existsSync(path.join(dir, ".celler")), existsSync(short)], [true, true])
+  await platform.close()
+  assert.deepEqual([existsSync(path.join(dir, ".celler")), existsSync(short)], [false, false])
+  assert.equal((await started).isError, true)
 }))

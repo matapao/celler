@@ -106,3 +106,41 @@ test("a refused delivery's response body is cancelled, not left holding its conn
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(cancelled, true)
 })
+
+test("a token that can't be had keeps the approval pending, as nothing was sent; the one it is approved with is the one sent", async t => {
+  const database = memoryDatabase(t)
+  const sent = []
+  t.mock.method(globalThis, "fetch", async (_url, options) => (sent.push(options.headers.Authorization), new Response("accepted")))
+  let tokens = 0
+  const token = async () => {
+    if (++tokens === 1) throw new Error("keychain locked")
+    return `tok-${tokens}`
+  }
+  let call
+  const app = createApp({ database, adapters: new Map([["hook", postJson("acct", "https://example.invalid/hook", token)]]), platform: {
+    allowed: () => true,
+    launch: (_spec, connect) => withClient(connect, async client => {
+      call = client.callTool({ name: "post", arguments: { note: "hi" } })
+      await until(() => app.human.inbox("alice").length === 1)
+      return text("staged")
+    }),
+  } })
+  const revision = app.publish([cell("root", ["post"]), tool("post", { adapter: "hook" }, { inputSchema: object({ note: { type: "string" } }) })])
+  await app.start(request(revision))
+  call.catch(() => {})
+  const [item] = app.human.inbox("alice")
+  await assert.rejects(app.human.approve("alice", item.id), /keychain locked/)
+  assert.deepEqual([app.human.review("alice", item.id).state, sent], ["pending", []])
+  assert.deepEqual(await app.human.approve("alice", item.id), text("accepted"))
+  // Had once, as it was verified, and sent with.
+  assert.deepEqual([sent, tokens], [["Bearer tok-2"], 2])
+})
+
+test("a delivery whose answer is cut off as it is read counts as delivered: the call fails, never the delivery", async t => {
+  let pulls = 0
+  const body = new ReadableStream({ pull(controller) { if (pulls++) controller.error(new Error("connection reset")); else controller.enqueue(new Uint8Array(4)) } })
+  t.mock.method(globalThis, "fetch", async () => new Response(body, { status: 200 }))
+  const adapter = postJson("acct", "https://example.invalid/hook", async () => "tok")
+  const answer = await adapter.send({}, await adapter.prepare({}, {}), "k")
+  assert.deepEqual(answer, { isError: true, content: [{ type: "text", text: "Delivered, but its response could not be read" }] })
+})

@@ -142,3 +142,11 @@ test("the app's limits are the host's to set by name, the discover tool's own bo
   assert.equal(database.prepare("PRAGMA busy_timeout").get().timeout, 250)
   assert.throws(() => createApp({ database, platform: {}, adapters: new Map(), maxTasks: 0 }), /Invalid maxTasks/)
 })
+
+test("a limit in milliseconds is a timer's, no longer than one waits: a longer one is refused, not cut to a millisecond", t => {
+  const options = { database: memoryDatabase(t), adapters: new Map(), platform: { allowed: () => true, launch: async () => text("") } }
+  for (const name of ["taskTtlMs", "progressIntervalMs", "busyTimeoutMs"]) {
+    assert.throws(() => createApp({ ...options, [name]: 2 ** 31 }), error => error.code === "INVALID_CONFIG" && error.message === `Invalid ${name}: longer than a timer waits`, name)
+  }
+  assert.ok(createApp({ ...options, taskTtlMs: 2 ** 31 - 1 }))
+})

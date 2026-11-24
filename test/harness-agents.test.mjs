@@ -116,12 +116,12 @@ test("Claude Code starts in its settings file for this system, with no settings 
   assert.equal(started.client, "host/1.0.0")
   // Its own system prompt, which a cell with no context of its own doesn't take away: no prompt in its place.
   assert.equal(sentTo(log).find(e => e.what === "initialize").data.systemPrompt, undefined)
-  // To read: nothing that writes, and nothing written but its scratch.
+  // To read: nothing that writes, no commands either, and nothing written but its scratch.
   const read = await runtime.run(spec({ cwd: dir, purpose: "read" }), () => undefined).done
   assert.equal(read.ok, true, read.error)
   const reading = sentTo(log).filter(e => e.what === "started").at(-1).data
   const tools = reading.args.find(arg => arg.startsWith("--tools=")).slice("--tools=".length).split(",")
-  assert.deepEqual(["Write", "Edit", "NotebookEdit"].filter(tool => tools.includes(tool)), [])
+  assert.deepEqual(["Write", "Edit", "NotebookEdit", "Bash", "TaskStop"].filter(tool => tools.includes(tool)), [])
   assert.equal(reading.settings.sandbox.filesystem.allowWrite.includes(realpathSync.native(dir)), false)
   // A model-only decision: no tools at all, so no sandbox, and no MCP server.
   const decided = await runtime.run(spec({ cwd: dir, purpose: "inference", mcpServers: [github] }), () => undefined).done
@@ -160,7 +160,8 @@ test("Codex's run says what it ran, edited and replied, with its usage and model
   const result = await new AgentRuntime(fakeCodex(codexHome, { FAKE_CODEX_LOG: path.join(dir, "codex.jsonl") }), host).run(spec({ cwd: dir }), p => progress.push(p)).done
   assert.equal(result.ok, true, result.error)
   assert.deepEqual([result.text, result.model, result.costUsd], ["Ran them.", "gpt-6-luna", null])
-  assert.deepEqual(result.usage, { input: 10, output: 20, cacheRead: 4, cacheWrite5m: 2, cacheWrite1h: 0 })
+  // Its input without what it read from its cache, which is counted on its own: 10 tokens in all.
+  assert.deepEqual(result.usage, { input: 6, output: 20, cacheRead: 4, cacheWrite5m: 2, cacheWrite1h: 0 })
   // A command as it was given, not as its shell ran it.
   assert.deepEqual(progress.filter(p => p.type === "tool").map(p => [p.tool, p.summary]), [["execute", "execute: npm test"], ["edit", `edit ${path.join(dir, "notes.md")}`]])
   assert.deepEqual(progress.filter(p => p.type === "file").map(p => p.file), [path.join(dir, "notes.md")])

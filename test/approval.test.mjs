@@ -244,6 +244,54 @@ test("blind retries join their approval, a retry right after a timeout works, an
   assert.deepEqual(await app.start(request(revision)), text("done"))
 })
 
+test("the same call made again once its approval is settled is made again, and a blind retry of it joins it", async t => {
+  const sent = []
+  let runId
+  const app = createApp({ database: memoryDatabase(t), adapters: new Map([["delivery", {
+    prepare: async (_run, args) => packet(String(args.message)),
+    // The service refuses the first, as it answers: an answer like any, kept as sent.
+    send: async (_run, write) => {
+      sent.push(write)
+      return sent.length === 1 ? { isError: true, content: [{ type: "text", text: "no lines" }] } : text("sent")
+    },
+  }]]), platform: {
+    allowed: () => true,
+    launch: (spec, connect) => withClient(connect, async client => {
+      runId = spec.id
+      // As Claude Code and Codex call: no celler/call-id, the same arguments each time.
+      const call = () => client.callTool({ name: "send", arguments: { message: "invoice 7" } })
+      const pending = () => app.human.inbox("alice").filter(item => item.state === "pending")
+      const approve = async () => {
+        await until(() => pending().length === 1)
+        await app.human.approve("alice", pending()[0].id)
+      }
+      const first = call()
+      await approve()
+      assert.deepEqual(await first, { isError: true, content: [{ type: "text", text: "no lines" }] })
+      // Made again: a card of its own, and a retry of it while it waits joins that one.
+      const second = call()
+      await until(() => pending().length === 1)
+      const retry = call()
+      await delay(50)
+      assert.equal(pending().length, 1)
+      await approve()
+      assert.deepEqual(await second, text("sent"))
+      assert.deepEqual(await retry, text("sent"))
+      assert.equal(sent.length, 2)
+      return text("done")
+    }),
+  } })
+  const revision = app.publish([cell("root", ["send"]), tool("send", { adapter: "delivery" }, {
+    inputSchema: object({ message: { type: "string" } }),
+  })])
+  assert.deepEqual(await app.start(request(revision)), text("done"))
+  // Its run ended, the same call collects what the last one it staged came to, and stages nothing more.
+  await withClient(channel => app.reconnect("alice", runId, channel), async client => {
+    assert.deepEqual(await client.callTool({ name: "send", arguments: { message: "invoice 7" } }), text("sent"))
+  })
+  assert.deepEqual([sent.length, app.human.inbox("alice").filter(item => item.state === "pending")], [2, []])
+})
+
 test("a packet made once its run's caller has ended is never left for a person", async t => {
   let preparing = false, release
   const gate = new Promise(resolve => { release = resolve })
@@ -270,4 +318,34 @@ test("a packet made once its run's caller has ended is never left for a person",
   release()
   await delay(100)
   assert.deepEqual(app.human.inbox("alice"), [])
+})
+
+test("a cancelled run's approvals don't fill the inbox: they can never be sent, and another run's still fit", async t => {
+  const database = memoryDatabase(t)
+  const delivery = { prepare: async (_run, args) => packet(String(args.message)), send: async () => text("sent") }
+  const app = createApp({ database, maxPendingApprovals: 1, adapters: new Map([["delivery", delivery]]), platform: {
+    allowed: () => true,
+    launch: (spec, connect) => withClient(connect, async client => {
+      if (spec.input === "first") {
+        use(client, "k", "first").catch(() => {})
+        await pending(app)
+        // Cancelled while its approval waits.
+        app.end("alice", spec.id)
+        return text("left")
+      }
+      const call = use(client, "k", "second")
+      await until(() => app.human.inbox("alice").filter(row => row.state === "pending").length === 2)
+      const second = app.human.inbox("alice").find(row => row.state === "pending" && row.runStatus === "running")
+      await app.human.approve("alice", second.id)
+      return await call
+    }),
+  } })
+  const revision = app.publish(graph)
+  await app.start({ ...request(revision), input: "first" }).catch(() => {})
+  assert.deepEqual(await app.start({ ...request(revision), input: "second" }), text("sent"))
+  // The cancelled run's, still there for the person to decline.
+  const [left] = app.human.inbox("alice").filter(row => row.state === "pending")
+  assert.equal(left.runStatus, "cancelled")
+  app.human.decline("alice", left.id)
+  assert.deepEqual(app.human.inbox("alice").filter(row => row.state === "pending"), [])
 })

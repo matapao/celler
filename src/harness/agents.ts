@@ -4,7 +4,7 @@
 // strictest, as the settings files for each system say (sandbox/claude.*.ts, sandbox/codex.*.ts); everything outside
 // the folder goes through the run's MCP tools.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { agentVersions, harnessLimits } from "../limits.js"
 import { runClaude } from "./claude.js"
@@ -97,6 +97,15 @@ function loggedIn(answer: string | null): boolean | null {
 
 // ---------------------------------------------------------------- Codex
 
+/** A file's text, or null when it isn't there: read at once, never checked for first, which it could change between. */
+function readText(file: string): string | null {
+  try {
+    return readFileSync(file, "utf8")
+  } catch {
+    return null
+  }
+}
+
 /** The `config.toml` of the host's Codex home: its sign-in kept in a file there, not the person's own. */
 export const CODEX_HOME_CONFIG = 'cli_auth_credentials_store = "file"\n'
 
@@ -118,7 +127,7 @@ export function codexAgent(o: { codex?: () => string | null; home: string; words
       // Its sign-in is kept there: made for its owner alone.
       mkdirSync(o.home, { recursive: true, mode: 0o700 })
       const file = path.join(o.home, "config.toml")
-      if (!existsSync(file) || readFileSync(file, "utf8") !== CODEX_HOME_CONFIG) writeFileSync(file, CODEX_HOME_CONFIG)
+      if (readText(file) !== CODEX_HOME_CONFIG) writeFileSync(file, CODEX_HOME_CONFIG)
     },
     env: () => ({ ...CODEX_OWN_SIGN_IN, CODEX_HOME: o.home }),
     homeVariable: "CODEX_HOME",

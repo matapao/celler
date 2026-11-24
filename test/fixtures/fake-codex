@@ -3,7 +3,8 @@
 // it was started with and given in FAKE_CODEX_LOG, and answers with Codex's own events: its thread, a command it ran,
 // a file it wrote, its reply and its usage. With FAKE_CODEX_TOOL, it first calls that tool on the MCP server in its
 // settings, each header's value from the variable the header names, and its reply ends with the tool's answer. With
-// FAKE_CODEX_EXIT_AT_ONCE, it ends before it reads its prompt, as Codex does with a setting it refuses.
+// FAKE_CODEX_EXIT_AT_ONCE, it ends before it reads its prompt, as Codex does with a setting it refuses. With
+// FAKE_CODEX_IGNORE_STOP, it never ends its turn and takes no notice of SIGTERM, and writes its pid there.
 import { appendFileSync } from "node:fs"
 import path from "node:path"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
@@ -42,6 +43,11 @@ if (resume === "missing") {
 }
 send({ type: "thread.started", thread_id: resume ?? "fake-thread" })
 send({ type: "turn.started" })
+if (process.env.FAKE_CODEX_IGNORE_STOP) {
+  process.on("SIGTERM", () => undefined)
+  appendFileSync(process.env.FAKE_CODEX_IGNORE_STOP, String(process.pid))
+  await new Promise(() => setInterval(() => undefined, 60_000))
+}
 if (process.env.FAKE_CODEX_MCP_401) {
   send({ type: "error", message: "MCP client for `github` failed to start: 401 Unauthorized" })
   send({ type: "turn.failed", error: { message: "MCP server github: 401 Unauthorized" } })
