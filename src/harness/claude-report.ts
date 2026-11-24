@@ -9,6 +9,7 @@ import type {
   ModelInfo,
   OnElicitation,
   PermissionResult,
+  SDKAssistantMessageError,
   SDKMessage,
   SDKPartialAssistantMessage,
   SDKResultMessage,
@@ -39,6 +40,11 @@ const SIGNED_OUT = new Set([
   'billing_error',
   'cloud_credential_error',
 ]);
+/** Why its turn ended without its reply, where it says so in a field: its result's kind, or its last message's error. */
+const ENDED_AS: Partial<Record<SDKResultMessage['subtype'], RunResult['ended']>> = {
+  error_max_turns: 'max-turns',
+};
+const ENDED_BY: Partial<Record<SDKAssistantMessageError, RunResult['ended']>> = { rate_limit: 'usage-limit' };
 /** What it says when it isn't signed in itself. */
 const SIGN_IN_RE = /api key|\/login|authenticat|oauth|not logged in|credit balance/i;
 /** What the person may answer to a call it asks about: once, or not. "Always" would be written into the folder's settings. */
@@ -95,6 +101,8 @@ export class Report {
   private streamed = new Set<string>();
   private ended?: SDKResultMessage;
   private error?: string;
+  /** The error its last message of its own carried, if any: one that ends its turn is the last it writes. */
+  private lastError?: SDKAssistantMessageError;
   private signedOut = false;
   private model?: string;
   /** Its models' names in its own words, by the model each is. */
@@ -127,6 +135,7 @@ export class Report {
         return this.streaming(m.event, m.parent_tool_use_id);
       case 'assistant':
         if (m.error && SIGNED_OUT.has(m.error)) this.signedOut = true;
+        if (m.parent_tool_use_id === null) this.lastError = m.error;
         for (const block of m.message.content) {
           if (block.type === 'tool_use') this.tool(block.id, block.name, block.input, m.parent_tool_use_id);
           // A message of its own it didn't stream, whole.
@@ -287,11 +296,13 @@ export class Report {
       permissionDenials,
       refusedWrites: [...this.refused],
     };
+    const ended = (r && ENDED_AS[r.subtype]) ?? (this.lastError && ENDED_BY[this.lastError]);
     const failed = (error: string, runtimeDown = false) => ({
       ...result,
       ok: false,
       error: error.slice(0, L.errorChars),
       runtimeDown,
+      ...(ended ? { ended } : {}),
     });
     // Only a sign-in problem before this turn used anything takes the whole runtime offline.
     const spent = usage.input + usage.output + usage.cacheRead + usage.cacheWrite5m + usage.cacheWrite1h > 0;

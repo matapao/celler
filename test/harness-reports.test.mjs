@@ -18,8 +18,8 @@ import {
   spec,
 } from './support-harness.mjs';
 
-// What a run reports and how it ends: its cost, the forms and helpers on its way, what it was refused, the files and
-// effort it was given, and an agent that won't end, or can't start, ending it anyway.
+// What a run reports and how it ends: why, where that is known, its cost, the forms and helpers on its way, what it was
+// refused, the files and effort it was given, and an agent that won't end, or can't start, ending it anyway.
 
 const allow = async () => ({ option: 'allow' });
 
@@ -41,6 +41,25 @@ test("a run's cost is its own: a new session's, never a resumed one's, whose tot
     // A sign-in that no longer works takes the runtime offline on a resumed session too, which cost something before.
     const expired = await run({ FAKE_CLAUDE_EXPIRED: '1' }, { resume: true, sessionId: 'fake-session' });
     assert.deepEqual([expired.ok, expired.runtimeDown, expired.error], [false, true, claudeWords.login]);
+  }));
+
+test("why a run ended is a field where it is known for certain: celler's clock ran out, or Claude Code says so in one, never only in words", () =>
+  inFolder(async (dir) => {
+    const ended = async (env, over = {}) => {
+      const result = await new AgentRuntime(
+        fakeClaude({ FAKE_CLAUDE_LOG: path.join(dir, 'agent.jsonl'), ...env }),
+        host,
+      ).run(spec({ cwd: dir, ask: allow, ...over }), () => undefined).done;
+      return [result.ok, result.ended];
+    };
+    assert.deepEqual(await ended({ FAKE_CLAUDE_SLOW: '5000' }, { timeoutMs: 500 }), [false, 'timed-out']);
+    assert.deepEqual(await ended({ FAKE_CLAUDE_ENDS: 'rate_limit' }), [false, 'usage-limit']);
+    assert.deepEqual(await ended({ FAKE_CLAUDE_ENDS: 'error_max_turns' }), [false, 'max-turns']);
+    // A budget, which nothing in celler gives an agent, is no reason of its own.
+    assert.deepEqual(await ended({ FAKE_CLAUDE_ENDS: 'error_max_budget_usd' }), [false, undefined]);
+    // A run that ends with its reply says nothing, nor one that fails for a reason no field gives.
+    assert.deepEqual(await ended({}), [true, undefined]);
+    assert.deepEqual(await ended({ FAKE_CLAUDE_EXPIRED: '1' }), [false, undefined]);
   }));
 
 test("a form one of the agent's MCP servers asks for reaches the person with its fields and choices, and what they fill in goes back", () =>
@@ -165,7 +184,7 @@ test('a Codex that takes no notice of being stopped still ends its run, a grace 
     const started = Date.now();
     try {
       const result = await new AgentRuntime(fake, host).run(spec({ cwd: dir, timeoutMs: 500 }), () => undefined).done;
-      assert.deepEqual([result.ok, result.error], [false, 'Timed out after 1 s']);
+      assert.deepEqual([result.ok, result.ended, result.error], [false, 'timed-out', 'Timed out after 1 s']);
       assert.ok(Date.now() - started < 500 + harnessLimits.exitGraceMs + 2_000, `${Date.now() - started} ms`);
     } finally {
       // Its SDK keeps its process to itself: the test ends what it left.

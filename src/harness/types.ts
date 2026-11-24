@@ -93,6 +93,12 @@ export interface RunResult {
   /** Files it was refused writing outside its folder. */
   refusedWrites?: string[];
   cancelled?: boolean;
+  /**
+   * Why it ended without its reply, where that is known for certain: celler's clock ran out (`timed-out`), or its
+   * agent's SDK says so in a field, never only in words: its account at a usage or rate limit (`usage-limit`), or at the
+   * turns its agent was given (`max-turns`). Unset when nothing says.
+   */
+  ended?: 'timed-out' | 'usage-limit' | 'max-turns';
 }
 
 export interface RunHandle {

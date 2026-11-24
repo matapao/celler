@@ -8,6 +8,8 @@
 // its turn fails as one signed out does. With FAKE_CLAUDE_SUBSCRIPTION, it is signed in to a subscription. With
 // FAKE_CLAUDE_FORM, one of its MCP servers asks the person for a form, and its reply says what came back. With
 // FAKE_CLAUDE_HELPER, a path outside its folder, it starts a helper, which searches, and is refused writing that file.
+// With FAKE_CLAUDE_ENDS, its turn ends at a limit as Claude Code says it: a result of that subtype, or with
+// "rate_limit", a last message with that error, its account at its usage limit.
 import { spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import path from 'node:path';
@@ -179,6 +181,26 @@ async function turn(prompt) {
       usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     });
   }
+  if (process.env.FAKE_CLAUDE_ENDS === 'rate_limit') {
+    const said = "You've hit your limit · resets 5pm";
+    send({
+      type: 'assistant',
+      message: {
+        id: 'm-limit',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-haiku-fake',
+        content: [{ type: 'text', text: said }],
+      },
+      error: 'rate_limit',
+      parent_tool_use_id: null,
+      session_id: session,
+      uuid: `u-${++count}`,
+    });
+    return result({ is_error: true, result: said });
+  }
+  if (process.env.FAKE_CLAUDE_ENDS)
+    return result({ subtype: process.env.FAKE_CLAUDE_ENDS, is_error: true, errors: [], stop_reason: null });
   const used = await toolAnswer();
   streamed('m1', 'Hello.');
   // A search of the folder, which asks nothing.

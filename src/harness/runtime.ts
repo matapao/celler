@@ -222,7 +222,8 @@ export class AgentRuntime implements Runtime {
     };
     const end = (r: RunResult): RunResult => {
       if (stopped === 'cancelled') return { ...r, ok: false, cancelled: true, error: 'Cancelled' };
-      if (stopped === 'timed out') return { ...r, ok: false, error: `Timed out after ${duration(spec.timeoutMs)}` };
+      if (stopped === 'timed out')
+        return { ...r, ok: false, ended: 'timed-out', error: `Timed out after ${duration(spec.timeoutMs)}` };
       return r;
     };
     clock.arm();
