@@ -80,6 +80,40 @@ test("a run of the published graph reaches its cell's tools through the harness,
     );
   }));
 
+test("a call to one of the run's MCP tools is reported with its server and tool, by either agent; a tool of the agent's own has neither", () =>
+  inFolder(async (dir) => {
+    const reported = async (agent) => {
+      const tools = [];
+      const progress = (_run, p) => p.type === 'tool' && tools.push(p);
+      const { platform, app } = desk(() => new AgentRuntime(agent, host), { progress }, new Map([['echo', echo]]));
+      const revision = app.publish([
+        { kind: 'cell', id: 'desk', title: 'Desk', profile: 'any', exports: ['echo'] },
+        { kind: 'tool', id: 'echo', ...echoTool },
+      ]);
+      try {
+        const result = await app.start({ owner: 'office', revision, entry: 'desk', workspace: dir, input: 'Use echo' });
+        assert.equal(result.isError, false, JSON.stringify(result));
+        return tools.map((p) => ({ tool: p.tool, ...('mcp' in p ? { mcp: p.mcp } : {}) }));
+      } finally {
+        await platform.close();
+      }
+    };
+    const echoed = { server: 'office', tool: 'echo' };
+    // Claude Code's name for it keeps its own form; the server and tool are apart beside it.
+    const claude = fakeClaude({ FAKE_CLAUDE_LOG: path.join(dir, 'claude.jsonl'), FAKE_CLAUDE_TOOL: 'echo' });
+    assert.deepEqual(await reported(claude), [
+      { tool: 'mcp__office__echo', mcp: echoed },
+      { tool: 'Grep' },
+      { tool: 'Bash' },
+    ]);
+    const codex = fakeCodex(codexHome, { FAKE_CODEX_LOG: path.join(dir, 'codex.jsonl'), FAKE_CODEX_TOOL: 'echo' });
+    assert.deepEqual(await reported(codex), [
+      { tool: 'office.echo', mcp: echoed },
+      { tool: 'execute' },
+      { tool: 'edit' },
+    ]);
+  }));
+
 test("an agent that searches its tools itself is given them all, and any other gets celler's menu", () =>
   inFolder(async (dir) => {
     const listed = async (nativeDiscovery) => {

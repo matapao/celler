@@ -214,8 +214,10 @@ class Report {
         const command = IN_SHELL.exec(item.command)?.[2] ?? item.command;
         return this.tool(item.id, 'execute', `execute: ${command.slice(0, L.commandChars)}`);
       }
-      case 'mcp_tool_call':
-        return this.tool(item.id, `${item.server}.${item.tool}`, `${item.server}.${item.tool}`);
+      case 'mcp_tool_call': {
+        const named = `${item.server}.${item.tool}`;
+        return this.tool(item.id, named, named, { server: item.server, tool: item.tool });
+      }
       case 'web_search':
         return this.tool(item.id, 'websearch', `websearch "${item.query.slice(0, L.searchChars)}"`);
       case 'file_change':
@@ -224,11 +226,11 @@ class Report {
     }
   }
 
-  /** A call, once. */
-  private tool(id: string, tool: string, summary: string): void {
+  /** A call, once; one to an MCP tool with its server and tool, which Codex gives apart. */
+  private tool(id: string, tool: string, summary: string, mcp?: { server: string; tool: string }): void {
     if (this.reported.has(id)) return;
     this.reported.add(id);
-    this.t.progress({ type: 'tool', tool, summary, call: id });
+    this.t.progress({ type: 'tool', tool, summary, call: id, ...(mcp ? { mcp } : {}) });
   }
 
   /** The files an edit of its changed, or couldn't: one outside its folder is a write refused. */

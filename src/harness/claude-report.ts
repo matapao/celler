@@ -18,7 +18,15 @@ import { harnessLimits as L } from '../limits.js';
 import { formOf, isRecord, questionFields } from './claude-forms.js';
 import { saysSignedOut, type Turn } from './runtime.js';
 import { outside } from './sandbox/places.js';
-import { emptyUsage, errorText, type AgentAsk, type AgentSetting, type RunResult, type TokenUsage } from './types.js';
+import {
+  emptyUsage,
+  errorText,
+  type AgentAsk,
+  type AgentSetting,
+  type McpServerSpec,
+  type RunResult,
+  type TokenUsage,
+} from './types.js';
 
 /** Its tools that write a file, and those that start a helper (a subagent). */
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit']);
@@ -77,6 +85,17 @@ function summarize(name: string, input: unknown): string {
     if (typeof value === 'string') return summary(name, value);
   }
   return name;
+}
+
+/**
+ * The MCP server and tool a call is to, by the name it gives the call (`mcp__<server>__<tool>`), where the server is one
+ * of the run's: none for a tool of its own. A server's name may hold `__` too, so the longest that fits is the one.
+ */
+function mcpOf(name: string, servers: McpServerSpec[]): { server: string; tool: string } | undefined {
+  const fits = servers.map((s) => s.name).filter((server) => name.startsWith(`mcp__${server}__`));
+  const server = fits.sort((a, b) => b.length - a.length)[0];
+  if (server === undefined) return undefined;
+  return { server, tool: name.slice(`mcp__${server}__`.length) };
 }
 
 /** Its usage; cache writes without their lifetime count as 5-minute ones, its default. */
@@ -194,11 +213,12 @@ export class Report {
     this.t.progress({ type: 'text', text: this.writing });
   }
 
-  /** A call once it is made, with what it is to do; a helper's with what it is for. */
+  /** A call once it is made, with what it is to do; a helper's with what it is for; an MCP tool's with its server. */
   private tool(id: string, name: string, input: unknown, parent: string | null): void {
     if (this.calls.has(id)) return;
     this.calls.set(id, { name, file: WRITE_TOOLS.has(name) ? fileOf(input) : undefined });
     const helper = HELPER_TOOLS.has(name) && isRecord(input) ? helperOf(input) : '';
+    const mcp = mcpOf(name, this.t.spec.mcpServers);
     this.t.progress({
       type: 'tool',
       tool: name,
@@ -206,6 +226,7 @@ export class Report {
       call: id,
       ...(parent ? { parent } : {}),
       ...(helper ? { helper } : {}),
+      ...(mcp ? { mcp } : {}),
     });
   }
 

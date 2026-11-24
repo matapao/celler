@@ -65,8 +65,19 @@ export interface RunSpec {
 
 export type RunProgress =
   | { type: 'session'; sessionId: string }
-  /** A tool call once its summary is known; `parent`: the helper's call it came from; `helper`: what a helper it starts is to do. */
-  | { type: 'tool'; tool: string; summary: string; call?: string; parent?: string; helper?: string }
+  /**
+   * A tool call once its summary is known; `parent`: the helper's call it came from; `helper`: what a helper it starts
+   * is to do; `mcp`: for a call to one of the run's MCP servers, that server and its tool, as its agent names them.
+   */
+  | {
+      type: 'tool';
+      tool: string;
+      summary: string;
+      call?: string;
+      parent?: string;
+      helper?: string;
+      mcp?: { server: string; tool: string };
+    }
   | { type: 'helper-done'; call: string; ok: boolean }
   /** A file a completed tool call changed. */
   | { type: 'file'; file: string }
