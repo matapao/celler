@@ -153,6 +153,10 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
     'INSERT INTO approvals(id,owner,run,tool,args,packet,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING',
   );
   const selectProgress = db.prepare('SELECT state,result FROM approvals WHERE owner=? AND id=?');
+  // Whether a call of the run heard what a call key came to: it returned, or failed with it, rather than being withdrawn.
+  const selectHeard = db.prepare(
+    "SELECT 1 FROM events WHERE run=? AND kind IN ('returned','failed') AND json_extract(detail, '$.key')=? LIMIT 1",
+  );
   const selectApprovalMeta = db.prepare('SELECT run,tool FROM approvals WHERE owner=? AND id=?');
   const updateState = db.prepare(
     'UPDATE approvals SET state=?,result=coalesce(?,result) WHERE owner=? AND id=? AND state=?',
@@ -238,18 +242,20 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
   }
   /**
    * The key of a call its client gave no key of its own (`celler/call-id`), from its tool and arguments (`base`): that
-   * of the approval it joins while that one is still open, as a blind retry does; once it is settled, the next of the
-   * same call's, so the same call made again is made again, and a retry of that one joins it. A run that has ended
-   * collects what the last one it staged came to.
+   * of the approval it joins, as a blind retry does, while that one is still open, or settled with no call of the run
+   * having heard what it came to (the one made withdrew, its connection lost); once one has, the next of the same
+   * call's, so the same call made again is made again, and a retry of that one joins it. A run that has ended collects
+   * what the last one it staged came to.
    */
   function callKey(run: Run, base: string): string {
-    const settled = (key: string) => {
+    const heard = (key: string) => {
       const state = selectProgress.get(run.owner, approvalId(run, key))?.state;
-      return state === 'sent' || state === 'declined' || state === 'failed';
+      const settled = state === 'sent' || state === 'declined' || state === 'failed';
+      return settled && selectHeard.get(run.id, key) !== undefined;
     };
     const over = ended(run.id);
     let key = base;
-    for (let n = 1; settled(key); n++) {
+    for (let n = 1; heard(key); n++) {
       const next = hash([base, n]);
       if (over && !selectProgress.get(run.owner, approvalId(run, next))) return key;
       key = next;
