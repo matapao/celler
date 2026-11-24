@@ -237,7 +237,8 @@ test("an agent that ends cleanly is stopped once, and never sent SIGKILL: a grou
     assert.equal(result.ok, true, result.error)
     await delay(harnessLimits.exitGraceMs * 6)
     // oxlint-disable-next-line typescript/no-unsafe-unary-minus -- its agent ran (its result is ok), so handle.pid is a number
-    assert.deepEqual(sent.filter(([pid]) => pid === -handle.pid), [[-handle.pid, "SIGTERM"]])
+    const group = -handle.pid
+    assert.deepEqual(sent.filter(([pid]) => pid === group), [[group, "SIGTERM"]])
   } finally {
     process.kill = kill
     harnessLimits.exitGraceMs = grace

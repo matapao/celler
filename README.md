@@ -17,8 +17,11 @@ import { createApp, createBroker } from "celler"
 
 const { platform, adapters, workspaceNodes } = createBroker({ executable: brokerPath }, () => true)
 const app = createApp({ database: new DatabaseSync("celler.sqlite"), platform, adapters })
-const revision = app.publish([...workspaceNodes, { kind: "cell", id: "review", title: "Review",
-  profile: "default", context: ["Summarize the workspace."], exports: ["files"] }])
+const context = ["Summarize the workspace."]
+const revision = app.publish([
+  ...workspaceNodes,
+  { kind: "cell", id: "review", title: "Review", profile: "default", context, exports: ["files"] },
+])
 // owner and workspace come from the host's own authentication
 await app.start({ owner, revision, entry: "review", workspace, input: "Summarize the notes." })
 ```
