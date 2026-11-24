@@ -14,16 +14,29 @@
 // - to read, none of its tools writes: no file tool that writes, and no commands, which its sandbox always lets write its
 //   working folder, whatever it is told.
 
-import { AGENT_SETTINGS, type Places } from "./places.js"
+import { AGENT_SETTINGS, type Places } from './places.js';
 
 /** Its own tools: files, commands, helpers, the run's MCP tools and questions to the person. */
-const WORK_TOOLS = ["Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "Bash", "TaskStop", "Agent", "ToolSearch", "TodoWrite", "AskUserQuestion"]
+const WORK_TOOLS = [
+  'Read',
+  'Write',
+  'Edit',
+  'NotebookEdit',
+  'Glob',
+  'Grep',
+  'Bash',
+  'TaskStop',
+  'Agent',
+  'ToolSearch',
+  'TodoWrite',
+  'AskUserQuestion',
+];
 /** Those that can change the folder, which a run to read doesn't have: its commands, and stopping one, among them. */
-const WRITING_TOOLS = ["Write", "Edit", "NotebookEdit", "Bash", "TaskStop"]
+const WRITING_TOOLS = ['Write', 'Edit', 'NotebookEdit', 'Bash', 'TaskStop'];
 
-export function claudeOnMacos(p: Places, purpose: "work" | "read") {
+export function claudeOnMacos(p: Places, purpose: 'work' | 'read') {
   return {
-    tools: purpose === "work" ? WORK_TOOLS : WORK_TOOLS.filter((tool) => !WRITING_TOOLS.includes(tool)),
+    tools: purpose === 'work' ? WORK_TOOLS : WORK_TOOLS.filter((tool) => !WRITING_TOOLS.includes(tool)),
     sandbox: {
       enabled: true, // every command it runs, in the sandbox
       failIfUnavailable: true, // no sandbox, no run
@@ -38,7 +51,7 @@ export function claudeOnMacos(p: Places, purpose: "work" | "read") {
         allowRead: [p.folder, p.scratch.short, ...p.tools, ...p.readable],
         // Written: the folder at work, else only its own scratch in it, though a run to read has no commands (and its
         // shell's own temporary folder, which its sandbox adds itself). Nothing else: what isn't here can't be written.
-        allowWrite: purpose === "work" ? [p.folder] : [p.scratch.root],
+        allowWrite: purpose === 'work' ? [p.folder] : [p.scratch.root],
       },
       network: {
         allowedDomains: [], // no host at all
@@ -48,12 +61,12 @@ export function claudeOnMacos(p: Places, purpose: "work" | "read") {
         allowAllUnixSockets: false,
       },
       // The proxies' variables are Claude Code's own, to reach its service; never its commands'.
-      credentials: { envVars: p.hidden.map((name) => ({ name, mode: "deny" as const })) },
+      credentials: { envVars: p.hidden.map((name) => ({ name, mode: 'deny' as const })) },
     },
     settings: {
       permissions: {
         // Its commands, every one in the sandbox, which keeps them to all of the above: none waits for the person.
-        allow: ["Bash"],
+        allow: ['Bash'],
         // Its own file tools: in the folder only. And with its sandbox and its network kept to an allow-list, Claude
         // Code's commands see none of the person's home or other users' folders (but the person's git settings, which
         // it keeps readable for git), and it opens again the folders its tools are in there.
@@ -67,10 +80,10 @@ export function claudeOnMacos(p: Places, purpose: "work" | "read") {
       autoMemoryEnabled: false, // nothing carried from one run to the next
     },
     // At work, edits in the folder go ahead; to read, nothing of its own would ask. Anything else asks the person.
-    permissionMode: purpose === "work" ? ("acceptEdits" as const) : ("default" as const),
+    permissionMode: purpose === 'work' ? ('acceptEdits' as const) : ('default' as const),
     // Its own temporary folder, the run's short one: its sandbox gives its commands theirs in it (`claude-<uid>`), and
     // falls back to the one all of the person's Claude Code shares when that path is too long for its sockets. And git
     // with no personal settings.
-    env: { CLAUDE_CODE_TMPDIR: p.scratch.short, GIT_CONFIG_GLOBAL: "/dev/null" },
-  }
+    env: { CLAUDE_CODE_TMPDIR: p.scratch.short, GIT_CONFIG_GLOBAL: '/dev/null' },
+  };
 }

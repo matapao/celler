@@ -1,7 +1,7 @@
-import { fail } from "./errors.js"
+import { fail } from './errors.js';
 
 /** The largest packet, payload or result held in memory at once. */
-const INLINE_LIMIT = 16 * 1024 * 1024
+const INLINE_LIMIT = 16 * 1024 * 1024;
 
 // Every tunable bound and its default, by component. Hosts override a bound by naming it in that component's options.
 export const appLimits = {
@@ -44,7 +44,7 @@ export const appLimits = {
   progressIntervalMs: 15_000,
   /** How long a statement waits for another connection's lock on the database. */
   busyTimeoutMs: 5000,
-}
+};
 export const brokerLimits = {
   inlineLimit: INLINE_LIMIT,
   /** Workspace operations running at once; each one starts the broker. Launches don't count. */
@@ -54,16 +54,16 @@ export const brokerLimits = {
   /** The longest path, and the longest text a search looks for, that a workspace tool takes. */
   pathChars: 4096,
   queryChars: 4096,
-}
-export const readLimits = { maxBytes: INLINE_LIMIT }
-export const postLimits = { timeoutMs: 30_000, maxResponseBytes: 1024 * 1024 }
+};
+export const readLimits = { maxBytes: INLINE_LIMIT };
+export const postLimits = { timeoutMs: 30_000, maxResponseBytes: 1024 * 1024 };
 
 // Module constants: no options name them.
 
 /** How deep objects and arrays may nest in the JSON celler copies: a graph, a run's input, an approval's arguments. */
-export const jsonDepth = 256
+export const jsonDepth = 256;
 /** MCP's tasks: how many a listing gives at once, and how often a client is told to look again. */
-export const taskListing = { pageSize: 10, pollMs: 1000 }
+export const taskListing = { pageSize: 10, pollMs: 1000 };
 /** The coding agents' harnesses: how long a program is waited for, and how much of what it says is kept. */
 export const harnessLimits = {
   /** A program asked its version or whether it is signed in. */
@@ -94,30 +94,32 @@ export const harnessLimits = {
    * the agent's bound is the only one: Claude Code's own default (MCP_TOOL_TIMEOUT, 1e8 ms, about 28 hours), for both.
    */
   mcpCallMs: 100_000_000,
-}
+};
 
 /**
  * The oldest of each agent's own programs a run starts: the version its SDK is made with (the Claude Agent SDK's
  * `claudeCodeVersion`, the Codex SDK's `@openai/codex`), which test/harness-programs.test.mjs holds against the
  * installed SDKs.
  */
-export const agentVersions = { claude: "2.1.330", codex: "0.171.0" }
+export const agentVersions = { claude: '2.1.330', codex: '0.171.0' };
 
-const ZERO_ALLOWED = new Set(["discoveryBytes", "maxDepth", "progressIntervalMs"])
+const ZERO_ALLOWED = new Set(['discoveryBytes', 'maxDepth', 'progressIntervalMs']);
 /** The longest wait a timer takes in one go: a bound in milliseconds (its name ends in Ms) is one, and stays under it. */
-const LONGEST_TIMER_MS = 2 ** 31 - 1
+const LONGEST_TIMER_MS = 2 ** 31 - 1;
 
 /**
  * Each default unless the options name it. Every bound is a positive safe integer, or zero where allowed; one in
  * milliseconds no longer than a timer waits, which would wait 1 ms for a longer one.
  */
 export function withLimits<T extends Record<string, number>>(defaults: T, options: { [K in keyof T]?: number }): T {
-  const limits: Record<string, number> = {}
+  const limits: Record<string, number> = {};
   for (const [name, fallback] of Object.entries(defaults)) {
-    const value = options[name as keyof T] ?? fallback
-    if (!Number.isSafeInteger(value) || value < (ZERO_ALLOWED.has(name) ? 0 : 1)) fail("INVALID_CONFIG", "Invalid " + name)
-    if (name.endsWith("Ms") && value > LONGEST_TIMER_MS) fail("INVALID_CONFIG", `Invalid ${name}: longer than a timer waits`)
-    limits[name] = value
+    const value = options[name as keyof T] ?? fallback;
+    if (!Number.isSafeInteger(value) || value < (ZERO_ALLOWED.has(name) ? 0 : 1))
+      fail('INVALID_CONFIG', 'Invalid ' + name);
+    if (name.endsWith('Ms') && value > LONGEST_TIMER_MS)
+      fail('INVALID_CONFIG', `Invalid ${name}: longer than a timer waits`);
+    limits[name] = value;
   }
-  return limits as T
+  return limits as T;
 }

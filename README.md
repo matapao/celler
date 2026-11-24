@@ -12,18 +12,18 @@ pnpm test                        # strict TypeScript build, then the tests
 ## Use
 
 ```ts
-import { DatabaseSync } from "node:sqlite"
-import { createApp, createBroker } from "celler"
+import { DatabaseSync } from 'node:sqlite';
+import { createApp, createBroker } from 'celler';
 
-const { platform, adapters, workspaceNodes } = createBroker({ executable: brokerPath }, () => true)
-const app = createApp({ database: new DatabaseSync("celler.sqlite"), platform, adapters })
-const context = ["Summarize the workspace."]
+const { platform, adapters, workspaceNodes } = createBroker({ executable: brokerPath }, () => true);
+const app = createApp({ database: new DatabaseSync('celler.sqlite'), platform, adapters });
+const context = ['Summarize the workspace.'];
 const revision = app.publish([
   ...workspaceNodes,
-  { kind: "cell", id: "review", title: "Review", profile: "default", context, exports: ["files"] },
-])
+  { kind: 'cell', id: 'review', title: 'Review', profile: 'default', context, exports: ['files'] },
+]);
 // owner and workspace come from the host's own authentication
-await app.start({ owner, revision, entry: "review", workspace, input: "Summarize the notes." })
+await app.start({ owner, revision, entry: 'review', workspace, input: 'Summarize the notes.' });
 ```
 
 ## Concepts

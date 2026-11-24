@@ -8,149 +8,352 @@
 // its turn fails as one signed out does. With FAKE_CLAUDE_SUBSCRIPTION, it is signed in to a subscription. With
 // FAKE_CLAUDE_FORM, one of its MCP servers asks the person for a form, and its reply says what came back. With
 // FAKE_CLAUDE_HELPER, a path outside its folder, it starts a helper, which searches, and is refused writing that file.
-import { spawn } from "node:child_process"
-import { appendFileSync } from "node:fs"
-import path from "node:path"
-import readline from "node:readline"
-import { Client } from "@modelcontextprotocol/sdk/client/index.js"
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
+import { spawn } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
+import path from 'node:path';
+import readline from 'node:readline';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-const args = process.argv.slice(2)
-if (args[0] === "--version") {
-  console.log("2.1.330 (Claude Code)")
-  process.exit(0)
+const args = process.argv.slice(2);
+if (args[0] === '--version') {
+  console.log('2.1.330 (Claude Code)');
+  process.exit(0);
 }
-if (args[0] === "auth" && args[1] === "login") {
-  const url = process.env.FAKE_CLAUDE_LOGIN_URL ?? "https://claude.ai/oauth/authorize"
-  const out = process.env.FAKE_CLAUDE_LOGIN_ON_STDERR ? process.stderr : process.stdout
-  out.write(`Opening your browser to sign in. If it didn't open, visit: \x1b]8;;${url}\x07${url}\x1b]8;;\x07\n`)
-  await new Promise((resolve) => process.stdin.once("data", resolve))
-  process.exit(0)
+if (args[0] === 'auth' && args[1] === 'login') {
+  const url = process.env.FAKE_CLAUDE_LOGIN_URL ?? 'https://claude.ai/oauth/authorize';
+  const out = process.env.FAKE_CLAUDE_LOGIN_ON_STDERR ? process.stderr : process.stdout;
+  out.write(`Opening your browser to sign in. If it didn't open, visit: \x1b]8;;${url}\x07${url}\x1b]8;;\x07\n`);
+  await new Promise((resolve) => process.stdin.once('data', resolve));
+  process.exit(0);
 }
-if (args[0] === "auth") {
-  console.log(JSON.stringify({ loggedIn: !process.env.FAKE_CLAUDE_SIGNED_OUT }))
-  process.exit(0)
+if (args[0] === 'auth') {
+  console.log(JSON.stringify({ loggedIn: !process.env.FAKE_CLAUDE_SIGNED_OUT }));
+  process.exit(0);
 }
 
 // Where it says what it was sent: as the test names it, or, for an agent started with only its own environment, in its folder.
-const logFile = process.env.FAKE_CLAUDE_LOG ?? path.join(process.cwd(), "agent.jsonl")
-const log = (what, data) => appendFileSync(logFile, JSON.stringify({ what, data }) + "\n")
-const send = (message) => process.stdout.write(JSON.stringify(message) + "\n")
-const flag = (name) => args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ?? (args.includes(`--${name}`) ? args[args.indexOf(`--${name}`) + 1] : undefined)
-log("started", { args, cwd: process.cwd(), mark: process.env.HOST_RUN ?? null, client: process.env.CLAUDE_AGENT_SDK_CLIENT_APP ?? null, settings: flag("settings") ? JSON.parse(flag("settings")) : null })
+const logFile = process.env.FAKE_CLAUDE_LOG ?? path.join(process.cwd(), 'agent.jsonl');
+const log = (what, data) => appendFileSync(logFile, JSON.stringify({ what, data }) + '\n');
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\n');
+const flag = (name) =>
+  args.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) ??
+  (args.includes(`--${name}`) ? args[args.indexOf(`--${name}`) + 1] : undefined);
+log('started', {
+  args,
+  cwd: process.cwd(),
+  mark: process.env.HOST_RUN ?? null,
+  client: process.env.CLAUDE_AGENT_SDK_CLIENT_APP ?? null,
+  settings: flag('settings') ? JSON.parse(flag('settings')) : null,
+});
 
-const session = "fake-session"
-const mode = flag("permission-mode") ?? "default"
-let servers = {}
-let asking = null
-const waiting = new Map()
-let count = 0
+const session = 'fake-session';
+const mode = flag('permission-mode') ?? 'default';
+let servers = {};
+let asking = null;
+const waiting = new Map();
+let count = 0;
 const ask = (request) => {
-  const id = `req-${++count}`
-  send({ type: "control_request", request_id: id, request })
-  return new Promise((resolve) => waiting.set(id, resolve))
-}
-const assistant = (content, id = `msg-${++count}`) => send({ type: "assistant", message: { id, type: "message", role: "assistant", model: "claude-haiku-fake", content }, parent_tool_use_id: null, session_id: session, uuid: `u-${++count}` })
+  const id = `req-${++count}`;
+  send({ type: 'control_request', request_id: id, request });
+  return new Promise((resolve) => waiting.set(id, resolve));
+};
+const assistant = (content, id = `msg-${++count}`) =>
+  send({
+    type: 'assistant',
+    message: { id, type: 'message', role: 'assistant', model: 'claude-haiku-fake', content },
+    parent_tool_use_id: null,
+    session_id: session,
+    uuid: `u-${++count}`,
+  });
 const streamed = (id, text) => {
-  send({ type: "stream_event", event: { type: "message_start", message: { id, type: "message", role: "assistant", content: [], model: "claude-haiku-fake" } }, parent_tool_use_id: null, session_id: session, uuid: `u-${++count}` })
-  for (const part of text.match(/.{1,3}/gs)) send({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: part } }, parent_tool_use_id: null, session_id: session, uuid: `u-${++count}` })
-  assistant([{ type: "text", text }], id)
-}
-const usage = { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 5, cache_creation_input_tokens: 7, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 7 } }
+  send({
+    type: 'stream_event',
+    event: {
+      type: 'message_start',
+      message: { id, type: 'message', role: 'assistant', content: [], model: 'claude-haiku-fake' },
+    },
+    parent_tool_use_id: null,
+    session_id: session,
+    uuid: `u-${++count}`,
+  });
+  for (const part of text.match(/.{1,3}/gs))
+    send({
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: part } },
+      parent_tool_use_id: null,
+      session_id: session,
+      uuid: `u-${++count}`,
+    });
+  assistant([{ type: 'text', text }], id);
+};
+const usage = {
+  input_tokens: 10,
+  output_tokens: 20,
+  cache_read_input_tokens: 5,
+  cache_creation_input_tokens: 7,
+  cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 7 },
+};
 // Its total is the session's: a resumed one goes on from what its earlier turns cost, as Claude Code's does.
-const before = flag("resume") ? 0.05 : 0
-const result = (fields) => send({ type: "result", subtype: "success", is_error: false, duration_ms: 1, duration_api_ms: 1, num_turns: 1, stop_reason: "end_turn", total_cost_usd: before + 0.01, usage, modelUsage: {}, permission_denials: [], session_id: session, uuid: `u-${++count}`, ...fields })
+const before = flag('resume') ? 0.05 : 0;
+const result = (fields) =>
+  send({
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    duration_ms: 1,
+    duration_api_ms: 1,
+    num_turns: 1,
+    stop_reason: 'end_turn',
+    total_cost_usd: before + 0.01,
+    usage,
+    modelUsage: {},
+    permission_denials: [],
+    session_id: session,
+    uuid: `u-${++count}`,
+    ...fields,
+  });
 
 /** The answer of FAKE_CLAUDE_TOOL, called on the first HTTP server, its headers as given. */
 async function toolAnswer() {
-  const [name, server] = Object.entries(servers).find(([, s]) => s.type === "http") ?? []
-  if (!process.env.FAKE_CLAUDE_TOOL || !server) return ""
-  const mcp = new Client({ name: "fake-claude", version: "2.1.330" })
-  await mcp.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }))
+  const [name, server] = Object.entries(servers).find(([, s]) => s.type === 'http') ?? [];
+  if (!process.env.FAKE_CLAUDE_TOOL || !server) return '';
+  const mcp = new Client({ name: 'fake-claude', version: '2.1.330' });
+  await mcp.connect(
+    new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers } }),
+  );
   try {
-    log("tools/list", (await mcp.listTools()).tools.map((t) => t.name))
-    assistant([{ type: "tool_use", id: "t0", name: `mcp__${name}__${process.env.FAKE_CLAUDE_TOOL}`, input: { text: "hi" } }])
-    const answer = await mcp.callTool({ name: process.env.FAKE_CLAUDE_TOOL, arguments: { text: "hi" } })
-    return answer.content.map((c) => c.text ?? "").join(" ")
+    log(
+      'tools/list',
+      (await mcp.listTools()).tools.map((t) => t.name),
+    );
+    assistant([
+      { type: 'tool_use', id: 't0', name: `mcp__${name}__${process.env.FAKE_CLAUDE_TOOL}`, input: { text: 'hi' } },
+    ]);
+    const answer = await mcp.callTool({ name: process.env.FAKE_CLAUDE_TOOL, arguments: { text: 'hi' } });
+    return answer.content.map((c) => c.text ?? '').join(' ');
   } finally {
-    await mcp.close()
+    await mcp.close();
   }
 }
 
 async function turn(prompt) {
-  log("prompt", { text: prompt })
-  send({ type: "system", subtype: "init", session_id: session, model: "claude-haiku-fake", permissionMode: mode, cwd: process.cwd(), tools: [], mcp_servers: [], apiKeySource: "none", claude_code_version: "2.1.330", slash_commands: [], output_style: "default", skills: [], plugins: [], uuid: `u-${++count}` })
+  log('prompt', { text: prompt });
+  send({
+    type: 'system',
+    subtype: 'init',
+    session_id: session,
+    model: 'claude-haiku-fake',
+    permissionMode: mode,
+    cwd: process.cwd(),
+    tools: [],
+    mcp_servers: [],
+    apiKeySource: 'none',
+    claude_code_version: '2.1.330',
+    slash_commands: [],
+    output_style: 'default',
+    skills: [],
+    plugins: [],
+    uuid: `u-${++count}`,
+  });
   if (process.env.FAKE_CLAUDE_SIGNED_OUT || process.env.FAKE_CLAUDE_EXPIRED) {
-    send({ type: "assistant", message: { id: "m-out", type: "message", role: "assistant", model: "claude-haiku-fake", content: [{ type: "text", text: "Not logged in · Please run /login" }] }, error: "authentication_failed", parent_tool_use_id: null, session_id: session, uuid: `u-${++count}` })
+    send({
+      type: 'assistant',
+      message: {
+        id: 'm-out',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-haiku-fake',
+        content: [{ type: 'text', text: 'Not logged in · Please run /login' }],
+      },
+      error: 'authentication_failed',
+      parent_tool_use_id: null,
+      session_id: session,
+      uuid: `u-${++count}`,
+    });
     // No model was called: nothing used, nothing spent.
-    return result({ is_error: true, result: "Not logged in · Please run /login", total_cost_usd: before, usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } })
+    return result({
+      is_error: true,
+      result: 'Not logged in · Please run /login',
+      total_cost_usd: before,
+      usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    });
   }
-  const used = await toolAnswer()
-  streamed("m1", "Hello.")
+  const used = await toolAnswer();
+  streamed('m1', 'Hello.');
   // A search of the folder, which asks nothing.
-  assistant([{ type: "tool_use", id: "g1", name: "Grep", input: { pattern: "TODO", path: "src" } }])
-  send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "g1", content: "No matches", is_error: false }] }, parent_tool_use_id: null, session_id: session, uuid: `u-${++count}` })
+  assistant([{ type: 'tool_use', id: 'g1', name: 'Grep', input: { pattern: 'TODO', path: 'src' } }]);
+  send({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'g1', content: 'No matches', is_error: false }],
+    },
+    parent_tool_use_id: null,
+    session_id: session,
+    uuid: `u-${++count}`,
+  });
   // With FAKE_CLAUDE_HELPER, a helper of its looks around, and it is refused writing a file outside its folder.
   if (process.env.FAKE_CLAUDE_HELPER) {
-    const done = (id, ok) => send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: ok ? "ok" : "Refused", is_error: !ok }] }, parent_tool_use_id: null, session_id: session, uuid: `u-${++count}` })
-    assistant([{ type: "tool_use", id: "h1", name: "Agent", input: { description: "Look around", prompt: "Look around the folder" } }])
-    send({ type: "assistant", message: { id: `msg-${++count}`, type: "message", role: "assistant", model: "claude-haiku-fake", content: [{ type: "tool_use", id: "h2", name: "Grep", input: { pattern: "FIXME" } }] }, parent_tool_use_id: "h1", session_id: session, uuid: `u-${++count}` })
-    done("h1", true)
-    assistant([{ type: "tool_use", id: "w1", name: "Write", input: { file_path: process.env.FAKE_CLAUDE_HELPER, content: "x" } }])
-    done("w1", false)
+    const done = (id, ok) =>
+      send({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: id, content: ok ? 'ok' : 'Refused', is_error: !ok }],
+        },
+        parent_tool_use_id: null,
+        session_id: session,
+        uuid: `u-${++count}`,
+      });
+    assistant([
+      {
+        type: 'tool_use',
+        id: 'h1',
+        name: 'Agent',
+        input: { description: 'Look around', prompt: 'Look around the folder' },
+      },
+    ]);
+    send({
+      type: 'assistant',
+      message: {
+        id: `msg-${++count}`,
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-haiku-fake',
+        content: [{ type: 'tool_use', id: 'h2', name: 'Grep', input: { pattern: 'FIXME' } }],
+      },
+      parent_tool_use_id: 'h1',
+      session_id: session,
+      uuid: `u-${++count}`,
+    });
+    done('h1', true);
+    assistant([
+      { type: 'tool_use', id: 'w1', name: 'Write', input: { file_path: process.env.FAKE_CLAUDE_HELPER, content: 'x' } },
+    ]);
+    done('w1', false);
   }
   // With FAKE_CLAUDE_FORM, an MCP server of its asks the person to fill in a form, and it says what came back.
   if (process.env.FAKE_CLAUDE_FORM) {
-    const requested_schema = { type: "object", properties: { name: { type: "string", title: "Your name" }, size: { type: "string", enum: ["s", "m"], enumNames: ["Small", "Medium"] } }, required: ["name"] }
-    const answer = await ask({ subtype: "elicitation", mcp_server_name: "github", message: "Who are you?", mode: "form", elicitation_id: "e1", requested_schema })
-    const said = `Form: ${answer.action} ${JSON.stringify(answer.content ?? {})}.`
-    streamed("m2", said)
-    return result({ result: `Hello. ${said}` })
+    const requested_schema = {
+      type: 'object',
+      properties: {
+        name: { type: 'string', title: 'Your name' },
+        size: { type: 'string', enum: ['s', 'm'], enumNames: ['Small', 'Medium'] },
+      },
+      required: ['name'],
+    };
+    const answer = await ask({
+      subtype: 'elicitation',
+      mcp_server_name: 'github',
+      message: 'Who are you?',
+      mode: 'form',
+      elicitation_id: 'e1',
+      requested_schema,
+    });
+    const said = `Form: ${answer.action} ${JSON.stringify(answer.content ?? {})}.`;
+    streamed('m2', said);
+    return result({ result: `Hello. ${said}` });
   }
   // With FAKE_CLAUDE_QUESTION, it asks the person a question of its own, with choices, and says what was picked.
   if (process.env.FAKE_CLAUDE_QUESTION) {
-    const questions = [{ question: "Which one?", header: "Pick", multiSelect: false, options: [{ label: "A", description: "The first" }, { label: "B", description: "The second" }] }]
-    const answer = await ask({ subtype: "can_use_tool", tool_name: "AskUserQuestion", input: { questions }, tool_use_id: "q1", permission_suggestions: [] })
-    const said = answer.behavior === "allow" ? `Picked ${answer.updatedInput.answers["Which one?"]}.` : "No pick."
-    streamed("m2", said)
-    return result({ result: `Hello. ${said}` })
+    const questions = [
+      {
+        question: 'Which one?',
+        header: 'Pick',
+        multiSelect: false,
+        options: [
+          { label: 'A', description: 'The first' },
+          { label: 'B', description: 'The second' },
+        ],
+      },
+    ];
+    const answer = await ask({
+      subtype: 'can_use_tool',
+      tool_name: 'AskUserQuestion',
+      input: { questions },
+      tool_use_id: 'q1',
+      permission_suggestions: [],
+    });
+    const said = answer.behavior === 'allow' ? `Picked ${answer.updatedInput.answers['Which one?']}.` : 'No pick.';
+    streamed('m2', said);
+    return result({ result: `Hello. ${said}` });
   }
-  const input = { command: "npm test" }
-  assistant([{ type: "tool_use", id: "t1", name: "Bash", input }])
-  asking = ask({ subtype: "can_use_tool", tool_name: "Bash", input, tool_use_id: "t1", title: "Run the tests", permission_suggestions: [] })
+  const input = { command: 'npm test' };
+  assistant([{ type: 'tool_use', id: 't1', name: 'Bash', input }]);
+  asking = ask({
+    subtype: 'can_use_tool',
+    tool_name: 'Bash',
+    input,
+    tool_use_id: 't1',
+    title: 'Run the tests',
+    permission_suggestions: [],
+  });
   // With FAKE_CLAUDE_LEAVE_RUNNING, a command of its keeps running after it, and says where it is.
   if (process.env.FAKE_CLAUDE_LEAVE_RUNNING) {
-    const left = spawn(process.execPath, ["-e", "setTimeout(() => undefined, 60_000)"], { stdio: "ignore" })
+    const left = spawn(process.execPath, ['-e', 'setTimeout(() => undefined, 60_000)'], { stdio: 'ignore' });
     // Not waited for: the agent can exit while it goes on, as a command put in the background does.
-    left.unref()
-    appendFileSync(process.env.FAKE_CLAUDE_LEAVE_RUNNING, String(left.pid))
+    left.unref();
+    appendFileSync(process.env.FAKE_CLAUDE_LEAVE_RUNNING, String(left.pid));
   }
   // With FAKE_CLAUDE_EXIT_WHILE_ASKING, it is gone while the person is still asked.
-  if (process.env.FAKE_CLAUDE_EXIT_WHILE_ASKING) return setTimeout(() => process.exit(3), 100)
-  const answer = await asking
-  const allowed = answer.behavior === "allow"
-  send({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: allowed ? "ok" : answer.message, is_error: !allowed }] }, parent_tool_use_id: null, session_id: session, uuid: `u-${++count}` })
-  const said = (allowed ? "Ran them." : "Didn't run them.") + (used ? ` ${used}` : "")
-  if (process.env.FAKE_CLAUDE_SLOW) await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_CLAUDE_SLOW)))
-  streamed("m2", said)
-  result({ result: `Hello. ${said}`, permission_denials: allowed ? [] : [{ tool_name: "Bash", tool_use_id: "t1", tool_input: input }] })
+  if (process.env.FAKE_CLAUDE_EXIT_WHILE_ASKING) return setTimeout(() => process.exit(3), 100);
+  const answer = await asking;
+  const allowed = answer.behavior === 'allow';
+  send({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [
+        { type: 'tool_result', tool_use_id: 't1', content: allowed ? 'ok' : answer.message, is_error: !allowed },
+      ],
+    },
+    parent_tool_use_id: null,
+    session_id: session,
+    uuid: `u-${++count}`,
+  });
+  const said = (allowed ? 'Ran them.' : "Didn't run them.") + (used ? ` ${used}` : '');
+  if (process.env.FAKE_CLAUDE_SLOW)
+    await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_CLAUDE_SLOW)));
+  streamed('m2', said);
+  result({
+    result: `Hello. ${said}`,
+    permission_denials: allowed ? [] : [{ tool_name: 'Bash', tool_use_id: 't1', tool_input: input }],
+  });
 }
 
-const input = readline.createInterface({ input: process.stdin })
-input.on("line", (line) => {
-  const message = JSON.parse(line)
-  if (message.type === "control_request" && message.request.subtype === "initialize") {
-    log("initialize", message.request)
-    servers = message.request.mcpServers ?? {}
-    const models = [{ value: "haiku", resolvedModel: "claude-haiku-fake", displayName: "Haiku (fake)" }]
-    return send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: { commands: [], agents: [], models, account: process.env.FAKE_CLAUDE_SUBSCRIPTION ? { subscriptionType: "max" } : {}, output_style: "default", available_output_styles: [], mcp_servers_applied: message.request.mcpServers !== undefined, claude_code_version: "2.1.330", pid: process.pid } } })
+const input = readline.createInterface({ input: process.stdin });
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  if (message.type === 'control_request' && message.request.subtype === 'initialize') {
+    log('initialize', message.request);
+    servers = message.request.mcpServers ?? {};
+    const models = [{ value: 'haiku', resolvedModel: 'claude-haiku-fake', displayName: 'Haiku (fake)' }];
+    return send({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: message.request_id,
+        response: {
+          commands: [],
+          agents: [],
+          models,
+          account: process.env.FAKE_CLAUDE_SUBSCRIPTION ? { subscriptionType: 'max' } : {},
+          output_style: 'default',
+          available_output_styles: [],
+          mcp_servers_applied: message.request.mcpServers !== undefined,
+          claude_code_version: '2.1.330',
+          pid: process.pid,
+        },
+      },
+    });
   }
-  if (message.type === "control_request" && message.request.subtype === "interrupt") {
-    log("interrupt", {})
-    send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {} } })
-    return result({ subtype: "error_during_execution", is_error: true, errors: ["Interrupted"] })
+  if (message.type === 'control_request' && message.request.subtype === 'interrupt') {
+    log('interrupt', {});
+    send({ type: 'control_response', response: { subtype: 'success', request_id: message.request_id, response: {} } });
+    return result({ subtype: 'error_during_execution', is_error: true, errors: ['Interrupted'] });
   }
-  if (message.type === "control_response") return waiting.get(message.response.request_id)?.(message.response.response)
-  if (message.type === "user") void turn(message.message.content.map((b) => b.text ?? "").join("\n"))
-})
-input.on("close", () => process.exit(0))
+  if (message.type === 'control_response') return waiting.get(message.response.request_id)?.(message.response.response);
+  if (message.type === 'user') void turn(message.message.content.map((b) => b.text ?? '').join('\n'));
+});
+input.on('close', () => process.exit(0));

@@ -13,7 +13,7 @@ updates:
       default-days: 7
     groups:
       agent-sdks:
-        patterns: ["@anthropic-ai/claude-agent-sdk", "@openai/codex-sdk"]
+        patterns: ['@anthropic-ai/claude-agent-sdk', '@openai/codex-sdk']
   - package-ecosystem: github-actions
     directory: /
     schedule:

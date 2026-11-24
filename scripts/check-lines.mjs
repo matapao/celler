@@ -6,8 +6,23 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const maximum = 500;
 const extensions = new Set([
-  '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs',
-  '.html', '.css', '.svg', '.sh', '.ps1', '.nsh', '.json', '.yaml', '.yml',
+  '.ts',
+  '.tsx',
+  '.mts',
+  '.cts',
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '.html',
+  '.css',
+  '.svg',
+  '.sh',
+  '.ps1',
+  '.nsh',
+  '.json',
+  '.yaml',
+  '.yml',
 ]);
 const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'coverage']);
 const lockfiles = new Set(['pnpm-lock.yaml', 'package-lock.json']);
@@ -40,8 +55,12 @@ const readme = readFileSync(join(root, 'README.md'), 'utf8').split(/\r\n|[\n\r]/
 if (readme.at(-1) === '') readme.pop();
 if (readme.length > readmeMaximum) violations.push(`README.md (${readme.length} lines; it keeps to ${readmeMaximum})`);
 if (violations.length) {
-  console.error(`Over the line limits (${maximum} a handwritten file, ${readmeMaximum} the README):\n${violations.sort().join('\n')}`);
+  console.error(
+    `Over the line limits (${maximum} a handwritten file, ${readmeMaximum} the README):\n${violations.sort().join('\n')}`,
+  );
   process.exitCode = 1;
 } else {
-  console.log(`Checked ${checked} handwritten files against the ${maximum}-line limit, and the README against ${readmeMaximum}.`);
+  console.log(
+    `Checked ${checked} handwritten files against the ${maximum}-line limit, and the README against ${readmeMaximum}.`,
+  );
 }

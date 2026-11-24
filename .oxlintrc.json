@@ -1,13 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": [
-    "typescript",
-    "unicorn",
-    "oxc",
-    "import",
-    "node",
-    "promise"
-  ],
+  "plugins": ["typescript", "unicorn", "oxc", "import", "node", "promise"],
   "categories": {
     "correctness": "error"
   },
@@ -29,17 +22,11 @@
   },
   "overrides": [
     {
-      "files": [
-        "test/**"
-      ],
+      "files": ["test/**"],
       "rules": {
         "typescript/no-floating-promises": "off"
       }
     }
   ],
-  "ignorePatterns": [
-    "dist/**",
-    "coverage/**",
-    "node_modules/**"
-  ]
+  "ignorePatterns": ["dist/**", "coverage/**", "node_modules/**"]
 }

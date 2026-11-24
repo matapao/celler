@@ -4,15 +4,15 @@
 // never starts again.
 
 /** The longest a timer waits in one go (Node's): a longer run's clock is set again when it is reached. */
-const LONGEST_WAIT = 2 ** 31 - 1
+const LONGEST_WAIT = 2 ** 31 - 1;
 
 export class RunClock {
   /** When its run's time is up, later by each while it stood still. */
-  private deadline: number
+  private deadline: number;
   /** How many waits hold it, and since when it has stood still. */
-  private waiting = 0
-  private pausedAt = 0
-  private timer: NodeJS.Timeout | undefined
+  private waiting = 0;
+  private pausedAt = 0;
+  private timer: NodeJS.Timeout | undefined;
 
   constructor(
     timeoutMs: number,
@@ -21,49 +21,49 @@ export class RunClock {
     /** Stops its run once its time is up. */
     private timedOut: () => void,
   ) {
-    this.deadline = Date.now() + timeoutMs
+    this.deadline = Date.now() + timeoutMs;
   }
 
   /** Set to its deadline, or its run stopped. */
   readonly arm = (): void => {
-    if (this.over()) return
-    clearTimeout(this.timer)
-    const left = this.deadline - Date.now()
+    if (this.over()) return;
+    clearTimeout(this.timer);
+    const left = this.deadline - Date.now();
     // Past its time, or with none it could keep: stopped now. Else woken at its deadline, a long one in steps.
-    if (!(left > 0)) return this.timedOut()
-    this.timer = setTimeout(this.arm, Math.min(left, LONGEST_WAIT))
-  }
+    if (!(left > 0)) return this.timedOut();
+    this.timer = setTimeout(this.arm, Math.min(left, LONGEST_WAIT));
+  };
 
   /** Held still until the release it gives is called. */
   readonly hold = (): (() => void) => {
     if (this.waiting++ === 0) {
-      this.pausedAt = Date.now()
-      clearTimeout(this.timer)
+      this.pausedAt = Date.now();
+      clearTimeout(this.timer);
     }
     // Released once: a release called again changes nothing.
-    let released = false
+    let released = false;
     return () => {
-      if (released) return
-      released = true
+      if (released) return;
+      released = true;
       if (--this.waiting === 0) {
-        this.deadline += Date.now() - this.pausedAt
-        this.arm()
+        this.deadline += Date.now() - this.pausedAt;
+        this.arm();
       }
-    }
-  }
+    };
+  };
 
   /** What is asked, the clock held meanwhile. */
   async meanwhile<T>(asked: () => Promise<T>): Promise<T> {
-    const release = this.hold()
+    const release = this.hold();
     try {
-      return await asked()
+      return await asked();
     } finally {
-      release()
+      release();
     }
   }
 
   /** Stopped for good, as its run ends. */
   stop(): void {
-    clearTimeout(this.timer)
+    clearTimeout(this.timer);
   }
 }
