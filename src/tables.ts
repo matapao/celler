@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, SQLOutputValue } from 'node:sqlite';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { hashed, type Hashed } from './json.js';
 import type { ApprovalState, EventKind, Run, RunStatus } from './store.js';
 
 // celler's tables in SQLite, what it keeps in them, and its records as a host reads them. It keeps only what it must, to
 // do its job and to answer for what left: a packet that was sent stays exactly as it was approved, and of what never
-// went, of a delivery's answer once its run has collected it and of a run's output, only a hash: `{"sha256":"…"}`. Why
-// a delivery failed, as its adapter told its run, is kept only until its run has collected it.
+// went, of a delivery's answer once its run or its host has heard it and of a run's output, only a hash:
+// `{"sha256":"…"}`. Why a delivery failed, as its adapter told its run, is kept only until its run has collected it.
 
 /** A packet as its adapter prepares it, the person approves it and its `send` delivers it. */
 export const packet = z.strictObject({
@@ -41,14 +42,34 @@ export type ApprovalSummary = {
   runStatus: RunStatus;
   createdAt: number;
 };
-type Reviewed = { id: string; run: Run; runStatus: RunStatus; tool: string };
-/**
- * An approval as the person reviews it: while it may go, has gone or may have, with its packet exactly as it was
- * frozen; once it never went, declined or failed, with when that was and its packet's hash alone.
- */
-export type ApprovalReview =
-  | (Reviewed & { state: Exclude<ApprovalState, UnsentState>; createdAt: number; write: Write })
-  | (Reviewed & { state: UnsentState; createdAt: number; changedAt: number; write: Hashed });
+type Reviewed = { id: string; run: Run; runStatus: RunStatus; tool: string; createdAt: number };
+/** An approval the person reviews while it may go, has gone or may have: its packet exactly as it was frozen. */
+export type PacketReview = Reviewed & { state: Exclude<ApprovalState, UnsentState>; write: Write };
+/** An approval the person reviews once it never went, declined or failed: when that was, and its packet's hash. */
+export type HashedReview = Reviewed & { state: UnsentState; changedAt: number; write: Hashed };
+/** An approval as the person reviews it, with its packet or only its hash: `isHashed` tells which. */
+export type ApprovalReview = PacketReview | HashedReview;
+
+/** Whether a review is of an approval that never went: one with when that was, and its packet's hash alone. */
+export function isHashed(review: ApprovalReview): review is HashedReview {
+  return unsent(review.state);
+}
+
+/** An approval's row as the person reviews it, with the run it was made for. */
+export function reviewOf(row: Record<string, SQLOutputValue>, run: Run): ApprovalReview {
+  const reviewed = {
+    id: String(row.id),
+    run,
+    runStatus: String(row.run_status) as RunStatus,
+    tool: String(row.tool),
+    createdAt: Number(row.created_at),
+  };
+  const state = String(row.state) as ApprovalState;
+  const kept: unknown = JSON.parse(String(row.packet));
+  if (unsent(state)) return { ...reviewed, state, changedAt: Number(row.changed_at), write: hashOnly.parse(kept) };
+  return { ...reviewed, state, write: packet.parse(kept) };
+}
+
 /** How a run ended, as its `ended` event keeps it: its status, and its output's hash, or that the host ended it. */
 export type RunEnd =
   | { status: 'ok' | 'failed'; output: Hashed }
@@ -57,6 +78,15 @@ export type RunEnd =
 export type HistoryEvent = { seq: number; at: number } & (
   { kind: 'ended'; detail: RunEnd } | { kind: Exclude<EventKind, 'ended'>; detail: unknown }
 );
+
+/** A delivery's answer as it is kept. One that isn't JSON keeps none: the delivery stands, its answer fails its check. */
+export function receipt(value: CallToolResult): string | null {
+  try {
+    return JSON.stringify(value) ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /** JSON text as celler keeps what it doesn't keep: its value's hash. */
 export function cleared(text: string): string {
@@ -69,6 +99,9 @@ export function approvalId(runId: string, key: string): string {
     .update(JSON.stringify([runId, key]))
     .digest('hex');
 }
+
+/** The version of its tables this celler keeps, in the database's `user_version`: an older celler's is below it. */
+const tablesVersion = 1;
 
 /** Makes celler's tables in a new database, and brings an older celler's up to date. */
 export function openTables(db: DatabaseSync, busyTimeoutMs: number) {
@@ -100,30 +133,34 @@ export function openTables(db: DatabaseSync, busyTimeoutMs: number) {
     CREATE INDEX IF NOT EXISTS inbox ON approvals(owner, state);
     CREATE INDEX IF NOT EXISTS run_approvals ON approvals(run, state);
   `);
-  if (!db.prepare("SELECT 1 FROM pragma_table_info('approvals') WHERE name='changed_at'").get()) migrate(db);
+  if (Number(db.prepare('PRAGMA user_version').get()!.user_version) < tablesVersion) migrate(db);
 }
 
 /**
- * Brings a database an older celler kept up to date, once and all in one transaction: each approval gains when its
- * state last changed and when its run collected its answer, and what celler no longer keeps becomes its hash. The
- * columns it adds mark it done, so opened again, nothing changes.
+ * Brings a database an older celler kept up to date, once and all in one transaction: what celler no longer keeps
+ * becomes its hash, and in one from before 0.3.0 each approval gains when its state last changed and when its answer
+ * was heard. The version it sets marks it done, so opened again, nothing changes.
  */
 function migrate(db: DatabaseSync) {
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.exec(`
-      ALTER TABLE approvals ADD COLUMN changed_at INTEGER NOT NULL DEFAULT 0;
-      ALTER TABLE approvals ADD COLUMN collected_at INTEGER;
-    `);
-    // Its state last changed at its last event, or, with none, as it was made.
-    db.prepare(
-      'UPDATE approvals SET changed_at=coalesce((SELECT max(e.at) FROM events e WHERE e.run=approvals.run ' +
-        "AND e.kind IN ('approved','declined','delivery_failed','reconciled') AND json_extract(e.detail,'$.id')=approvals.id), " +
-        'created_at)',
-    ).run();
-    clearUnsent(db);
-    clearCollected(db);
-    clearOutputs(db);
+    if (!db.prepare("SELECT 1 FROM pragma_table_info('approvals') WHERE name='changed_at'").get()) {
+      db.exec(`
+        ALTER TABLE approvals ADD COLUMN changed_at INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE approvals ADD COLUMN collected_at INTEGER;
+      `);
+      // Its state last changed at its last event, or, with none, as it was made.
+      db.prepare(
+        'UPDATE approvals SET changed_at=coalesce((SELECT max(e.at) FROM events e WHERE e.run=approvals.run ' +
+          "AND e.kind IN ('approved','declined','delivery_failed','reconciled') AND json_extract(e.detail,'$.id')=approvals.id), " +
+          'created_at)',
+      ).run();
+      clearUnsent(db);
+      clearCollected(db);
+      clearOutputs(db);
+    }
+    clearApproved(db);
+    db.exec(`PRAGMA user_version = ${tablesVersion}`);
     db.exec('COMMIT');
   } catch (error) {
     if (db.isTransaction) db.exec('ROLLBACK');
@@ -167,6 +204,23 @@ function clearCollected(db: DatabaseSync) {
     if (!heard) continue;
     const { result } = answer.get(id)!;
     collect.run(result === null ? null : cleared(String(result)), heard.at, id);
+  }
+}
+
+/**
+ * A delivery's answer its host heard, as its approve returned it, that no call of its run had: its answer becomes its
+ * hash, heard as it was sent. One the host reconciled is kept until a call of its run hears it.
+ */
+function clearApproved(db: DatabaseSync) {
+  const approved = db.prepare(
+    "SELECT a.id,e.at FROM approvals a JOIN events e ON e.run=a.run AND e.kind='approved' " +
+      "AND json_extract(e.detail,'$.id')=a.id WHERE a.state='sent' AND a.collected_at IS NULL",
+  );
+  const answer = db.prepare('SELECT result FROM approvals WHERE id=?');
+  const collect = db.prepare('UPDATE approvals SET result=?,collected_at=? WHERE id=?');
+  for (const { id, at } of approved.all()) {
+    const { result } = answer.get(id)!;
+    collect.run(result === null ? null : cleared(String(result)), at, id);
   }
 }
 

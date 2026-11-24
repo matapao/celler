@@ -10,6 +10,8 @@ import {
   hashOnly,
   openTables,
   packet,
+  receipt,
+  reviewOf,
   unsent,
   type ApprovalReview,
   type ApprovalSummary,
@@ -95,7 +97,7 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
   const insertEvent = db.prepare('INSERT INTO events(run,kind,detail,at) VALUES(?,?,?,?)');
   const selectEvents = db.prepare('SELECT seq,at,kind,detail FROM events WHERE run=? ORDER BY seq');
   const selectReview = db.prepare(
-    'SELECT a.run,a.tool,a.packet,a.state,a.created_at,a.changed_at,r.status AS run_status ' +
+    'SELECT a.id,a.run,a.tool,a.packet,a.state,a.created_at,a.changed_at,r.status AS run_status ' +
       'FROM approvals a JOIN runs r ON r.id=a.run WHERE a.owner=? AND a.id=?',
   );
   const selectInbox = db.prepare(
@@ -130,13 +132,15 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
   const updateCollected = db.prepare('UPDATE approvals SET result=?,collected_at=? WHERE owner=? AND id=?');
   const clearReason = db.prepare("UPDATE approvals SET result=NULL WHERE owner=? AND id=? AND state='failed'");
 
-  // In-process wake-ups for calls waiting on an approval.
-  const waiters = new Map<string, Set<() => void>>();
-  function notify(id: string) {
-    const set = waiters.get(id);
-    if (!set) return;
-    waiters.delete(id);
-    for (const wake of set) wake();
+  // The calls of this process on each approval, each from before it stages or joins it until it ends: woken once a
+  // change is saved, and handed its answer as it was kept if its host heard that first, as only its hash is kept then.
+  type Listener = { wake?: () => void; handed?: { receipt: string | null } };
+  const listeners = new Map<string, Set<Listener>>();
+  function notify(id: string, handed?: Listener['handed']) {
+    for (const listener of listeners.get(id) ?? []) {
+      if (handed) listener.handed = handed;
+      listener.wake?.();
+    }
   }
 
   function record(run: string, kind: EventKind, detail: unknown) {
@@ -179,20 +183,9 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
   function review(owner: string, id: string): ApprovalReview {
     const row = selectReview.get(owner, id);
     if (!row) fail('NOT_FOUND', 'Unknown approval');
-    const reviewed = {
-      id,
-      run: loadRun(String(row.run)).run,
-      runStatus: String(row.run_status) as RunStatus,
-      tool: String(row.tool),
-    };
-    const state = String(row.state) as ApprovalState;
-    const createdAt = Number(row.created_at);
-    const kept: unknown = JSON.parse(String(row.packet));
-    if (unsent(state)) {
-      return { ...reviewed, state, createdAt, changedAt: Number(row.changed_at), write: hashOnly.parse(kept) };
-    }
-    return { ...reviewed, state, createdAt, write: packet.parse(kept) };
+    return reviewOf(row, loadRun(String(row.run)).run);
   }
+  /** A compare-and-set along the lifecycle. Its caller wakes the calls waiting on it (`notify`) once it is saved. */
   function transition(owner: string, id: string, from: ApprovalState, to: ApprovalState, result?: string | null) {
     if (!lifecycle[from].includes(to)) fail('INVALID_STATE', `Approval cannot move from ${from} to ${to}`);
     // What never went keeps no content: its arguments and its packet become their hash, in the same transaction.
@@ -201,9 +194,8 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
     const write = content ? cleared(String(content.packet)) : null;
     if (updateState.run(to, Date.now(), args, write, result ?? null, owner, id, from).changes !== 1)
       fail('INVALID_STATE', 'Approval is not ' + from);
-    notify(id);
   }
-  /** What a delivery came to, once its run has collected it: its answer's hash, with when; of why it failed, nothing. */
+  /** What a delivery came to, once its run or host heard it: its answer's hash and when; of why it failed, nothing. */
   function clearAnswer(owner: string, id: string) {
     const row = selectAnswer.get(owner, id);
     if (row) updateCollected.run(row.result === null ? null : cleared(String(row.result)), Date.now(), owner, id);
@@ -215,14 +207,6 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
       record(run.id, kind, detail);
       if (answer) clearAnswer(run.owner, answer);
     });
-  }
-  /** A delivery's answer as it is kept. One that isn't JSON keeps none: the delivery stands, its answer fails its check. */
-  function receipt(value: CallToolResult): string | null {
-    try {
-      return JSON.stringify(value) ?? null;
-    } catch {
-      return null;
-    }
   }
   /**
    * The key of a call its client gave no key of its own (`celler/call-id`), from its tool and arguments (`base`): that
@@ -338,12 +322,13 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
     }
   }
 
-  async function result(owner: string, id: string, signal: AbortSignal): Promise<CallToolResult> {
+  async function result(owner: string, id: string, signal: AbortSignal, listener: Listener): Promise<CallToolResult> {
     for (;;) {
       signal.throwIfAborted();
       const row = selectProgress.get(owner, id);
       if (!row) fail('NOT_FOUND', 'Unknown approval');
       if (row.state === 'sent') {
+        if (listener.handed) return JSON.parse(String(listener.handed.receipt));
         if (row.collected_at !== null) fail('INVALID_STATE', 'Delivered; an earlier call collected its answer');
         return JSON.parse(String(row.result));
       }
@@ -356,24 +341,33 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
       }
 
       await new Promise<void>((resolve, reject) => {
-        let set = waiters.get(id);
-        if (!set) {
-          set = new Set();
-          waiters.set(id, set);
-        }
-        const wake = () => {
+        const onAbort = () => {
+          listener.wake = undefined;
+          reject(signal.reason);
+        };
+        listener.wake = () => {
+          listener.wake = undefined;
           signal.removeEventListener('abort', onAbort);
           resolve();
         };
-        const onAbort = () => {
-          set.delete(wake);
-          if (set.size === 0) waiters.delete(id);
-          reject(signal.reason);
-        };
-        set.add(wake);
         signal.addEventListener('abort', onAbort, { once: true });
       });
     }
+  }
+  /** A call's hearing of the approval its key names: from before it stages or joins it, until it ends. */
+  function hearing(run: Run, key: string) {
+    const id = approvalId(run.id, key);
+    const listener: Listener = {};
+    let set = listeners.get(id);
+    if (!set) listeners.set(id, (set = new Set()));
+    set.add(listener);
+    return {
+      result: (signal: AbortSignal) => result(run.owner, id, signal, listener),
+      end() {
+        set.delete(listener);
+        if (set.size === 0) listeners.delete(id);
+      },
+    };
   }
 
   /** Sends an approved packet once, and gives what it answered with the run and tool it was made for. */
@@ -406,13 +400,18 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
         transition(owner, id, 'started', never ? 'failed' : 'unknown', reason && JSON.stringify(reason));
         record(item.run.id, 'delivery_failed', { id, tool: item.tool, ...(never ? { outcome: 'failed' } : {}) });
       });
+      notify(id);
       throw error;
     }
-    // Saved before anything checks the response, so a real delivery always keeps its receipt.
+    // Saved as sent before anything checks the response. Its host hears the answer as this returns, checked or not, as
+    // a call of its run would: only its hash is kept from then on, and the calls on it in this process are handed it.
+    const handed = { receipt: receipt(value) };
     atomically(() => {
-      transition(owner, id, 'started', 'sent', receipt(value));
+      transition(owner, id, 'started', 'sent', handed.receipt);
       record(item.run.id, 'approved', { id, tool: item.tool });
+      clearAnswer(owner, id);
     });
+    notify(id, handed);
     return { value, run: item.run, tool: item.tool };
   }
 
@@ -422,6 +421,7 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
       transition(owner, id, 'pending', 'declined');
       if (meta) record(String(meta.run), 'declined', { id, tool: String(meta.tool) });
     });
+    notify(id);
   }
 
   function reconcile(owner: string, id: string, outcome: 'sent' | 'failed', value?: CallToolResult) {
@@ -430,6 +430,7 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
       transition(owner, id, 'unknown', outcome, value && JSON.stringify(value));
       if (meta) record(String(meta.run), 'reconciled', { id, tool: String(meta.tool), outcome });
     });
+    notify(id);
   }
 
   function history(owner: string, id: string): HistoryEvent[] {
@@ -490,7 +491,7 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
     callKey,
     existingApproval,
     stage,
-    result,
+    hearing,
     review,
     approve,
   };

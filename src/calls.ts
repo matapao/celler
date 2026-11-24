@@ -37,28 +37,33 @@ export function createCalls(
     const adapter = registry.get(node.target.adapter);
     if (!adapter) fail('UNAVAILABLE', 'Adapter unavailable: ' + node.target.adapter);
     if ('call' in adapter) return adapter.call(run, args, signal);
-    const approval = await store.stage(
-      run,
-      key,
-      node.id,
-      args,
-      async (prepareSignal) => {
-        const write = await adapter.prepare(run, args, prepareSignal);
-        // The run, or a caller up its chain, may have ended while the packet was made: then it is left for no one.
-        runs.checkAncestors(run, true);
-        if (store.ended(run.id)) fail('RUN_ENDED', 'Run has ended');
-        return write;
-      },
-      signal,
-    );
-    o.staged.approval = approval;
-    // The run waits for the person until they decide, or the call is withdrawn or cut off: that time isn't the run's.
-    // Made as a task, the call waits, but its agent doesn't: it goes on with its work meanwhile.
-    const release = asTask ? undefined : platform.waiting?.(run);
+    // The call hears its approval from before it stages or joins it: an answer its host hears first is handed to it.
+    const hearing = store.hearing(run, key);
     try {
-      return await runs.waitFor(store.result(run.owner, approval, signal), signal, heartbeat);
+      o.staged.approval = await store.stage(
+        run,
+        key,
+        node.id,
+        args,
+        async (prepareSignal) => {
+          const write = await adapter.prepare(run, args, prepareSignal);
+          // The run, or a caller up its chain, may have ended while the packet was made: then it is left for no one.
+          runs.checkAncestors(run, true);
+          if (store.ended(run.id)) fail('RUN_ENDED', 'Run has ended');
+          return write;
+        },
+        signal,
+      );
+      // The run waits for the person until they decide, or the call is withdrawn or cut off: that time isn't the run's.
+      // Made as a task, the call waits, but its agent doesn't: it goes on with its work meanwhile.
+      const release = asTask ? undefined : platform.waiting?.(run);
+      try {
+        return await runs.waitFor(hearing.result(signal), signal, heartbeat);
+      } finally {
+        release?.();
+      }
     } finally {
-      release?.();
+      hearing.end();
     }
   }
 
@@ -93,10 +98,12 @@ export function createCalls(
         // was delegated by waits on it any more: nothing is held for the person.
         const approval = store.existingApproval(run, key, id, args);
         if (!approval) fail('RUN_ENDED', 'Run has ended');
+        const hearing = store.hearing(run, key);
         try {
-          const value = await runs.waitFor(store.result(run.owner, approval, signal), signal, heartbeat);
+          const value = await runs.waitFor(hearing.result(signal), signal, heartbeat);
           return runs.checkedResult(current, id, value);
         } finally {
+          hearing.end();
           // Heard, whether or not it passes its checks, or why it failed: its run has collected it.
           if (!signal.aborted) store.collect(run.owner, approval);
         }
@@ -104,7 +111,8 @@ export function createCalls(
 
       store.record(run.id, 'call', { id, key });
       // What a delivery came to is kept until a call of its run has heard it: its answer, as it returned or failed its
-      // checks, or why it failed; not while it was only withdrawn or cut off, so a retry still collects it.
+      // checks, or why it failed; not while it was only withdrawn or cut off, so a retry still collects it, unless its
+      // host has heard the answer as its approve returned it.
       const staged: { approval?: string } = {};
       try {
         const value = await execute(run, node, args, key, signal, { heartbeat, asTask, staged });

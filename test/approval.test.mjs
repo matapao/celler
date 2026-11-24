@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createApp } from '@matapao/celler';
+import { hash } from '../dist/json.js';
 import { cell, memoryDatabase, object, refused, request, text, tool, until, withClient } from './support.mjs';
 import { graph, packet, pending, use } from './support-approval.mjs';
 
@@ -71,7 +72,7 @@ test('approval binds destination and bytes, survives a reconnect, and delivers o
   assert.equal(sent.length, 1);
 });
 
-test('a service restart preserves pending packets and never replays an interrupted delivery', async (t) => {
+test("a service restart preserves pending packets and never replays an interrupted delivery, and the answer its host's approve returns is heard", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'celler-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const file = join(dir, 'state.sqlite');
@@ -106,9 +107,23 @@ test('a service restart preserves pending packets and never replays an interrupt
   const interrupted = inbox.find((row) => row.state === 'unknown');
   const pending = inbox.find((row) => row.state === 'pending');
   await assert.rejects(app.human.approve('alice', interrupted.id), /not pending/);
-  await app.human.approve('alice', pending.id);
+  assert.deepEqual(await app.human.approve('alice', pending.id), text('sent'));
   assert.equal(sent.length, 1);
   assert.equal(sent[0].content.message, 'second');
+  // No call of its run waits on it in this process: the host's approve heard its answer, and only its hash is kept.
+  const kept = database.prepare('SELECT result,collected_at FROM approvals WHERE id=?').get(pending.id);
+  assert.deepEqual(kept.result, JSON.stringify({ sha256: hash(text('sent')) }));
+  assert.ok(kept.collected_at > 0);
+  // Its run, connected again, makes the same call: it hears only that it was delivered.
+  await withClient(
+    (channel) => app.reconnect('alice', app.human.review('alice', pending.id).run.id, channel),
+    async (client) => {
+      await refused(
+        client.callTool({ name: 'send', arguments: { message: 'second' } }),
+        /^Delivered; an earlier call collected its answer$/,
+      );
+    },
+  );
   // The host settles the interrupted delivery once it has checked the destination.
   assert.throws(() => app.human.reconcile('alice', pending.id, 'sent'), /not unknown/);
   app.human.reconcile('alice', interrupted.id, 'sent');

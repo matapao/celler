@@ -150,7 +150,7 @@ test('the same call made again once its approval is settled is made again, and a
   assert.deepEqual([sent.length, app.human.inbox('alice').filter((item) => item.state === 'pending')], [2, []]);
 });
 
-test('a retry of a call whose answer reached no call collects it once it is settled; once heard, the same call is made again', async (t) => {
+test("a retry of a call that stopped waiting joins its approval: it collects what it comes to, or once the host's approve has heard that, that it was delivered; once heard, the same call is made again", async (t) => {
   const sent = [];
   const app = createApp({
     database: memoryDatabase(t),
@@ -171,20 +171,25 @@ test('a retry of a call whose answer reached no call collects it once it is sett
           const call = (options) =>
             client.callTool({ name: 'send', arguments: { message: 'invoice 8' } }, undefined, options);
           const pending = () => app.human.inbox('alice').filter((item) => item.state === 'pending');
-          // Its agent's own limit on the call ends it while it waits: the answer, once there, reaches no call.
+          // Its agent's own limit on the call ends it while it waits; made again, it joins the first's approval.
           const first = call({ timeout: 300 });
           await until(() => pending().length === 1);
           await assert.rejects(first, /timed out/);
+          const retry = call();
+          await delay(50);
+          assert.equal(pending().length, 1);
           await app.human.approve('alice', pending()[0].id);
-          // Made again, it is the retry that collects what the first came to: no card, nothing sent again.
-          assert.deepEqual(await call(), text('sent'));
+          // It is the retry that collects what the first came to: no card, nothing sent again.
+          assert.deepEqual(await retry, text('sent'));
           assert.deepEqual([sent.length, pending()], [1, []]);
-          // Once that was heard, the same call is a new one, with a card of its own.
-          const again = call();
+          // Once that was heard, the same call is a new one, with a card of its own. It too stops waiting, and the
+          // host's approve hears its answer: made again, it hears only that it was delivered, and nothing is sent.
+          const again = call({ timeout: 300 });
           await until(() => pending().length === 1);
+          await assert.rejects(again, /timed out/);
           await app.human.approve('alice', pending()[0].id);
-          assert.deepEqual(await again, text('sent'));
-          assert.equal(sent.length, 2);
+          await refused(call(), /^Delivered; an earlier call collected its answer$/);
+          assert.deepEqual([sent.length, pending()], [2, []]);
           return text('done');
         }),
     },

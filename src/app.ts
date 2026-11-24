@@ -142,6 +142,11 @@ export function createApp(options: AppOptions) {
         }
         store.reconcile(owner, id, outcome, value);
       },
+      /**
+       * Sends a pending packet the person approved, and gives its answer once its tool's checks pass it. Either way the
+       * host has heard it, as a call of its run would: celler keeps only its hash from then on, a call of its run still
+       * waiting on it hears it too, and the same call made again hears only that it was delivered.
+       */
       async approve(owner: string, id: string, signal?: AbortSignal): Promise<CallToolResult> {
         const { value, run, tool } = await store.approve(
           owner,
@@ -157,7 +162,7 @@ export function createApp(options: AppOptions) {
           },
           signal,
         );
-        // The store saved the response as sent first, so a response that fails its checks keeps its receipt.
+        // The store saved the delivery as sent first, so one whose answer fails its checks stays sent, with its hash.
         return runs.checkedResult(runs.graph(run.revision), tool, value);
       },
     },
