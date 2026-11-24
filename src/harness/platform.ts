@@ -1,13 +1,16 @@
 // A Platform for createApp that runs each run's agent through the harness. The agent reaches its run's MCP server at
-// a local address, in MCP sessions of its own; what it does and asks goes to the host; its result is the run's.
+// a local address, in MCP sessions of its own; what it does and asks goes to the host; its result is the run's. While
+// the person decides something for a run, its clock stands still, and so do the clocks of the runs it was delegated by.
 
+import { AsyncLocalStorage } from "node:async_hooks"
 import { randomBytes, randomUUID } from "node:crypto"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
+import { isJSONRPCRequest, type CallToolResult, type RequestId } from "@modelcontextprotocol/sdk/types.js"
 import type { Platform } from "../app.js"
+import { CellerError } from "../errors.js"
 import { harnessLimits } from "../limits.js"
 import { errorText, failure, type AgentAsk, type AskAnswer, type McpServerSpec, type RunHandle, type RunProgress, type RunResult, type RunSpec, type Runtime } from "./types.js"
 
@@ -30,15 +33,10 @@ export interface HarnessPlatform {
   started?(run: Launched, pid: number | undefined): void
   /** What the agent does, as it happens. */
   progress?(run: Launched, p: RunProgress): void
-  /** What the agent asks before it acts: put to a person, who answers; null when no one does. Without it, asks are cancelled. */
+  /** What the agent asks before it acts: put to a person, who answers; null when no one does. Without it, no ask is answered. */
   ask?(run: Launched, q: AgentAsk, signal: AbortSignal): Promise<AskAnswer | null>
   /** What the agent ended with, also when the run was stopped, when createApp keeps no result: what it used was spent. */
   ended?(run: Launched, result: RunResult): void
-}
-
-/** The cell's context as the agent's instructions: its texts, in order. */
-function instructions(context: Launched["context"]): string {
-  return context.map(textOf).join("\n\n")
 }
 
 /** A part of a cell's context as text; one with none, such as an image, can't be part of an agent's instructions. */
@@ -69,6 +67,13 @@ function resultFor(run: Launched, result: RunResult): CallToolResult {
 type Way = { connect: (transport: Transport) => Promise<void>; sessions: Map<string, StreamableHTTPServerTransport>; closed: boolean }
 
 /**
+ * The requests that came in each HTTP request to a run's MCP server, as its session hands them on. That request's
+ * response is the only way their answers reach the agent: no stream is kept for a client to resume, as MCP lets a
+ * server, so an answer whose stream its agent dropped could never arrive (serve).
+ */
+const carried = new AsyncLocalStorage<Set<RequestId>>()
+
+/**
  * No more sessions for a run, and the ones it has closed: at once, or after `graceMs`, so that the calls its end cut off
  * are answered first.
  */
@@ -85,19 +90,38 @@ function closeSessions(way: Way, graceMs = 0): void {
 export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promise<void> } {
   // Each run's way in, by a token of its own, which only that run's agent is given.
   const runs = new Map<string, Way>()
-  // The agents going, which close() stops.
-  const going = new Set<{ cancel(): void }>()
+  // The agents going, by their runs' ids, which close() stops: each one's handle, and the run that delegated it, if
+  // one did.
+  const going = new Map<string, { handle: RunHandle; caller: string | undefined }>()
   let http: Server | undefined
   let address: Promise<string> | undefined
+  // Once closed, it starts no agent and opens no server again; a server still opening as it closes opens for no run.
+  let closed = false
+  let opening: ((err: Error) => void) | undefined
+  const closedError = () => new CellerError("UNAVAILABLE", "The harness platform has closed: it starts no more runs")
+  const throwIfClosed = () => {
+    if (closed) throw closedError()
+  }
 
+  // Whatever a request is, it is answered here: none ends the host.
   async function serve(req: IncomingMessage, res: ServerResponse) {
-    const token = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1]
-    const way = token ? runs.get(token) : undefined
-    if (!way || new URL(req.url ?? "/", "http://local").pathname !== "/mcp") return void res.writeHead(404).end()
     try {
+      const token = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1]
+      const way = token ? runs.get(token) : undefined
+      // Only a run's own token, at its server's one address: an address that can't be read is none.
+      if (!way || URL.parse(req.url ?? "/", "http://local")?.pathname !== "/mcp") return void res.writeHead(404).end()
       const transport = await sessionFor(way, req.headers["mcp-session-id"])
       if (!transport) return void res.writeHead(404).end()
-      await transport.handleRequest(req, res)
+      // Its agent gone before its answer, which can then never reach it: what it asked is cut off, as when it cancels,
+      // so what that waits on, such as the person, no longer holds its run.
+      const requests = new Set<RequestId>()
+      res.once("close", () => {
+        if (res.writableFinished) return
+        for (const requestId of requests) {
+          transport.onmessage?.({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId, reason: "Its agent went before its answer" } })
+        }
+      })
+      await carried.run(requests, () => transport.handleRequest(req, res))
       // A request that opened no session (anything but an initialize) leaves nothing behind.
       if (!transport.sessionId) void transport.close()
     } catch {
@@ -112,6 +136,8 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
   async function sessionFor(way: Way, id: string | string[] | undefined): Promise<StreamableHTTPServerTransport | undefined> {
     if (id !== undefined) return typeof id === "string" ? way.sessions.get(id) : undefined
     const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
+      // A call as large as celler takes inline gets to celler, which says if it is too large.
+      maxRequestBodySize: harnessLimits.mcpRequestBytes,
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (opened) => {
         // One that opens as its run ends is closed, not kept.
@@ -124,7 +150,52 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
       if (transport.sessionId) way.sessions.delete(transport.sessionId)
     }
     await way.connect(transport)
+    // Each request it hands on is one the HTTP request it came in carried (serve).
+    const deliver = transport.onmessage
+    transport.onmessage = (message, extra) => {
+      if (isJSONRPCRequest(message)) carried.getStore()?.add(message.id)
+      deliver?.(message, extra)
+    }
     return transport
+  }
+
+  /**
+   * Stops the clocks of the run `id` and of the runs up its chain, until the release it returns: a run waits for the
+   * person while one it delegated does. A run whose agent isn't going here has no clock to stop, nor stops its callers'.
+   */
+  function hold(id: string | undefined): () => void {
+    const releases: (() => void)[] = []
+    let next = id
+    while (next !== undefined) {
+      const agent = going.get(next)
+      if (!agent) break
+      if (agent.handle.hold) releases.push(agent.handle.hold())
+      next = agent.caller
+    }
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      for (const release of releases) release()
+    }
+  }
+
+  /**
+   * Waits for the answer to what a run's agent asks the person (`asked`). Its runtime stops the run's own clock; the
+   * runs it was delegated by wait for the answer too, their clocks stopped until it comes or the ask is taken back
+   * (`signal`): never past the run's end.
+   */
+  async function answered<T>(run: Launched, signal: AbortSignal, asked: () => Promise<T>): Promise<T> {
+    const release = hold(run.parent?.run)
+    // Taken back, it is released even while the host's ask goes on.
+    if (signal.aborted) release()
+    else signal.addEventListener("abort", release, { once: true })
+    try {
+      return await asked()
+    } finally {
+      signal.removeEventListener("abort", release)
+      release()
+    }
   }
 
   function listening(): Promise<string> {
@@ -134,11 +205,14 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
       const failed = (err: Error) => {
         address = undefined
         http = undefined
+        opening = undefined
         reject(err)
       }
+      opening = failed
       server.once("error", failed)
       server.listen(0, "127.0.0.1", () => {
         server.off("error", failed)
+        opening = undefined
         resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`)
       })
       http = server
@@ -148,8 +222,10 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
 
   return {
     allowed: o.allowed,
+    waiting: (run) => hold(run.id),
     async launch(run, connect, signal): Promise<CallToolResult> {
       signal.throwIfAborted()
+      throwIfClosed()
       const runtime = o.runtime(run)
       if (!runtime) return { isError: true, content: [{ type: "text", text: `No agent for the profile ${run.profile}` }] }
       const token = randomBytes(24).toString("base64url")
@@ -164,8 +240,9 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
           { name: o.server, transport: "http", url: await listening(), headers: { Authorization: `Bearer ${token}` } },
           ...(own.mcpServers ?? []),
         ]
-        // The run may have been cancelled while its MCP server was opening.
+        // The run may have been cancelled, or the platform closed, while its MCP server was opening.
         signal.throwIfAborted()
+        throwIfClosed()
         const ask = o.ask
         let handle: RunHandle
         try {
@@ -173,9 +250,10 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
             {
               ...own,
               cwd: run.workspace,
-              systemPrompt: instructions(run.context),
+              // The cell's context as the agent's instructions: its texts, in order.
+              systemPrompt: run.context.map(textOf).join("\n\n"),
               mcpServers,
-              ...(ask ? { ask: (q: AgentAsk, s: AbortSignal) => ask(run, q, s) } : {}),
+              ...(ask ? { ask: (q: AgentAsk, s: AbortSignal) => answered(run, s, () => ask(run, q, s)) } : {}),
             },
             (p) => o.progress?.(run, p),
           )
@@ -185,7 +263,7 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
           o.ended?.(run, result)
           return resultFor(run, result)
         }
-        going.add(handle)
+        going.set(run.id, { handle, caller: run.parent?.run })
         const cancel = () => handle.cancel()
         signal.addEventListener("abort", cancel, { once: true })
         if (signal.aborted) cancel()
@@ -198,7 +276,7 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
         } finally {
           // A host's hook that threw before the run ended: its agent is stopped too, not left working.
           if (!result) handle.cancel()
-          going.delete(handle)
+          going.delete(run.id)
           signal.removeEventListener("abort", cancel)
         }
       } finally {
@@ -212,11 +290,14 @@ export function harnessPlatform(o: HarnessPlatform): Platform & { close(): Promi
      * left waiting for a person can still be approved, as when a host closes and starts again.
      */
     async close() {
-      for (const handle of going) handle.cancel()
+      closed = true
+      for (const { handle } of going.values()) handle.cancel()
       for (const way of runs.values()) closeSessions(way)
       const server = http
       http = undefined
       address = undefined
+      // A run waiting for the server to open hears that it won't, and starts no agent.
+      opening?.(closedError())
       if (server) {
         await new Promise<void>((resolve) => {
           server.close(() => resolve())

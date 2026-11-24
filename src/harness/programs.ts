@@ -3,12 +3,12 @@
 // a native program, started as it is.
 
 import { execFile } from "node:child_process"
-import { readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import os from "node:os"
 import path from "node:path"
 import { harnessLimits } from "../limits.js"
-import type { Places } from "./sandbox/places.js"
+import { realFolder, type Places } from "./sandbox/places.js"
 import type { Host } from "./types.js"
 
 const isWin = process.platform === "win32"
@@ -30,9 +30,10 @@ const PROGRAMS: Record<AgentProgram, { name: string; version: RegExp; places: st
   codex: { name: "Codex", version: /^codex(-cli)?\s+\d/im, places: isWin ? [path.join(localAppData, "Programs", "OpenAI", "Codex", "bin", "codex.exe"), npmShim("codex")] : unixPlaces("codex") },
 }
 
+/** A program in the folders PATH names in full: one relative to where the host happens to be holds none of the person's. */
 function onPath(name: string): string[] {
   const exts = isWin ? [".exe", ".cmd", ""] : [""]
-  return (process.env.PATH ?? "").split(path.delimiter).filter(Boolean).flatMap((dir) => exts.map((e) => path.join(dir, name + e)))
+  return (process.env.PATH ?? "").split(path.delimiter).filter((dir) => path.isAbsolute(dir)).flatMap((dir) => exts.map((e) => path.join(dir, name + e)))
 }
 
 function isFile(file: string): boolean {
@@ -48,7 +49,7 @@ export function findProgram(program: AgentProgram, chosen?: string | null): stri
   return [chosen, ...PROGRAMS[program].places, ...onPath(program)].find((f): f is string => !!f && isFile(f)) ?? null
 }
 
-/** Where the person showed the host each program, kept in `file`. */
+/** Where the person showed the host each program, by its full path, kept in `file` (its folder made for it). */
 export function chosenPrograms(file: string): { get(program: AgentProgram): string | null; set(program: AgentProgram, at: string | null): void } {
   let chosen: Partial<Record<AgentProgram, string>> = {}
   try {
@@ -60,7 +61,9 @@ export function chosenPrograms(file: string): { get(program: AgentProgram): stri
   return {
     get: (program) => chosen[program] ?? null,
     set(program, at) {
+      if (at !== null && !path.isAbsolute(at)) throw new Error(`${at} isn't a full path: where a program is, is kept only as one`)
       chosen = { ...chosen, [program]: at ?? undefined }
+      mkdirSync(path.dirname(file), { recursive: true })
       writeFileSync(`${file}.tmp`, JSON.stringify(chosen))
       renameSync(`${file}.tmp`, file)
     },
@@ -112,7 +115,7 @@ export function codexProgram(file: string): { program: string; path: string[] } 
   const exe = isWin ? "codex.exe" : "codex"
   // Its package's layout, then the one before it.
   for (const [program, helpers] of [[path.join(root, "bin", exe), path.join(root, "codex-path")], [path.join(root, "codex", exe), path.join(root, "path")]]) {
-    if (isFile(program)) return { program, path: isFolder(helpers) ? [helpers] : [] }
+    if (isFile(program)) return { program, path: realFolder(helpers) ? [helpers] : [] }
   }
   return { program: real, path: [] }
 }
@@ -123,14 +126,6 @@ function vendorOf(wrapper: string, platform: string): string {
     return path.join(path.dirname(createRequire(wrapper).resolve(`@openai/codex-${platform}/package.json`)), "vendor")
   } catch {
     return path.join(path.dirname(wrapper), "..", "vendor")
-  }
-}
-
-function isFolder(dir: string): boolean {
-  try {
-    return statSync(dir).isDirectory()
-  } catch {
-    return false
   }
 }
 

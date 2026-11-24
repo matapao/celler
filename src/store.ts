@@ -47,9 +47,9 @@ export type ApprovalReview = {
   id: string; run: Run; runStatus: RunStatus; tool: string; state: ApprovalState; createdAt: number; write: Write
 }
 export type HistoryEvent = { seq: number; at: number; kind: EventKind; detail: unknown }
-export type Delivery = (write: Write, key: string, signal?: AbortSignal) => Promise<CallToolResult>
-export type ResolvedDelivery = { verify?: (write: Write) => void | Promise<void>; send: Delivery }
-type StoreLimits = { inlineLimit: number; maxPendingApprovals: number; maxPendingBytes: number }
+type Delivery = (write: Write, key: string, signal?: AbortSignal) => Promise<CallToolResult>
+type ResolvedDelivery = { verify?: (write: Write) => void | Promise<void>; send: Delivery }
+type StoreLimits = { inlineLimit: number; maxPendingApprovals: number; maxPendingBytes: number; busyTimeoutMs: number }
 
 export function freezeRun(run: Run): Run {
   return Object.freeze(run.parent ? { ...run, parent: Object.freeze({ ...run.parent }) } : { ...run })
@@ -72,7 +72,7 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
   // synchronous=FULL makes every commit survive power loss. The pending→started commit must be durable before an
   // external send, or a reboot could offer the same approval again.
   db.exec(`
-    PRAGMA busy_timeout = 5000;
+    PRAGMA busy_timeout = ${limits.busyTimeoutMs};
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = FULL;
     CREATE TABLE IF NOT EXISTS revisions(
@@ -141,6 +141,18 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
   function record(run: string, kind: EventKind, detail: unknown) {
     insertEvent.run(run, kind, JSON.stringify(detail), Date.now())
   }
+  /** A state change and its audit event are one: written together, or not at all. */
+  function atomically(change: () => void) {
+    db.exec("BEGIN IMMEDIATE")
+    try {
+      change()
+      db.exec("COMMIT")
+    } catch (error) {
+      // SQLite may have rolled back already, as it does after some failures.
+      if (db.isTransaction) db.exec("ROLLBACK")
+      throw error
+    }
+  }
   function loadRun(id: string) {
     const row = selectRun.get(id)
     if (!row) fail("NOT_FOUND", "Unknown run")
@@ -149,13 +161,19 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
       grants: JSON.parse(String(row.grants)) as string[],
     }
   }
-  function ended(id: string): boolean {
+  function runStatus(id: string): RunStatus | undefined {
     const row = selectRunStatus.get(id)
-    return !!row && row.status !== "running"
+    return row ? (String(row.status) as RunStatus) : undefined
+  }
+  function ended(id: string): boolean {
+    const status = runStatus(id)
+    return status !== undefined && status !== "running"
   }
   /** Ends a running run once; a later end of the same run changes nothing. */
   function finishRun(id: string, status: Exclude<RunStatus, "running">, detail: unknown) {
-    if (updateRunStatus.run(status, id).changes === 1) record(id, "ended", detail)
+    atomically(() => {
+      if (updateRunStatus.run(status, id).changes === 1) record(id, "ended", detail)
+    })
   }
   function review(owner: string, id: string): ApprovalReview {
     const row = selectReview.get(owner, id)
@@ -170,10 +188,18 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
       write: packet.parse(JSON.parse(String(row.packet))),
     }
   }
-  function transition(owner: string, id: string, from: ApprovalState, to: ApprovalState, result?: string) {
+  function transition(owner: string, id: string, from: ApprovalState, to: ApprovalState, result?: string | null) {
     if (!lifecycle[from].includes(to)) fail("INVALID_STATE", `Approval cannot move from ${from} to ${to}`)
     if (updateState.run(to, result ?? null, owner, id, from).changes !== 1) fail("INVALID_STATE", "Approval is not " + from)
     notify(id)
+  }
+  /** A delivery's answer as it is kept. One that isn't JSON keeps none: the delivery stands, its answer fails its check. */
+  function receipt(value: CallToolResult): string | null {
+    try {
+      return JSON.stringify(value) ?? null
+    } catch {
+      return null
+    }
   }
   function approvalId(run: Run, key: string) {
     return createHash("sha256").update(JSON.stringify([run.id, key])).digest("hex")
@@ -280,43 +306,56 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
     }
   }
 
+  /** Sends an approved packet once, and gives what it answered with the run and tool it was made for. */
   async function approve(
     owner: string, id: string,
     resolve: (run: Run, tool: string) => ResolvedDelivery,
     signal?: AbortSignal,
-  ) {
+  ): Promise<{ value: CallToolResult; run: Run; tool: string }> {
     const item = review(owner, id)
     if (item.state !== "pending") fail("INVALID_STATE", "Approval is not pending")
     if (item.runStatus === "cancelled") fail("RUN_ENDED", "Run was cancelled")
-    const { verify, send } = resolve(item.run, item.tool)
+    const { verify } = resolve(item.run, item.tool)
     if (verify) await verify(item.write)
+    // What changed while verify ran counts: the run, the policy and the caller are asked again, and nothing waits
+    // from here to the compare-and-set.
+    if (runStatus(item.run.id) === "cancelled") fail("RUN_ENDED", "Run was cancelled")
+    const { send } = resolve(item.run, item.tool)
+    signal?.throwIfAborted()
     transition(owner, id, "pending", "started")
-    let value: CallToolResult, text: string
+    let value: CallToolResult
     try {
       // Send the snapshot the person saw, including the original attachment bytes.
       value = await send(item.write, id, signal)
-      text = JSON.stringify(value)
     } catch (error) {
-      transition(owner, id, "started", "unknown")
-      record(item.run.id, "delivery_failed", { id, tool: item.tool })
+      atomically(() => {
+        transition(owner, id, "started", "unknown")
+        record(item.run.id, "delivery_failed", { id, tool: item.tool })
+      })
       throw error
     }
     // Saved before anything checks the response, so a real delivery always keeps its receipt.
-    transition(owner, id, "started", "sent", text)
-    record(item.run.id, "approved", { id, tool: item.tool })
-    return value
+    atomically(() => {
+      transition(owner, id, "started", "sent", receipt(value))
+      record(item.run.id, "approved", { id, tool: item.tool })
+    })
+    return { value, run: item.run, tool: item.tool }
   }
 
   function decline(owner: string, id: string) {
-    const meta = selectApprovalMeta.get(owner, id)
-    transition(owner, id, "pending", "declined")
-    if (meta) record(String(meta.run), "declined", { id, tool: String(meta.tool) })
+    atomically(() => {
+      const meta = selectApprovalMeta.get(owner, id)
+      transition(owner, id, "pending", "declined")
+      if (meta) record(String(meta.run), "declined", { id, tool: String(meta.tool) })
+    })
   }
 
   function reconcile(owner: string, id: string, outcome: "sent" | "failed", value?: CallToolResult) {
-    const meta = selectApprovalMeta.get(owner, id)
-    transition(owner, id, "unknown", outcome, value && JSON.stringify(value))
-    if (meta) record(String(meta.run), "reconciled", { id, tool: String(meta.tool), outcome })
+    atomically(() => {
+      const meta = selectApprovalMeta.get(owner, id)
+      transition(owner, id, "unknown", outcome, value && JSON.stringify(value))
+      if (meta) record(String(meta.run), "reconciled", { id, tool: String(meta.tool), outcome })
+    })
   }
 
   return {
@@ -330,8 +369,12 @@ export function openStore(db: DatabaseSync, limits: StoreLimits) {
       if (!row) fail("NOT_FOUND", "Unknown revision")
       return JSON.parse(String(row.body))
     },
-    saveRun(run: Run, grants: string[]) {
-      insertRun.run(run.id, JSON.stringify(run), JSON.stringify(grants), Date.now())
+    /** Saves a run with its grants and its `started` event. */
+    saveRun(run: Run, grants: string[], detail: unknown) {
+      atomically(() => {
+        insertRun.run(run.id, JSON.stringify(run), JSON.stringify(grants), Date.now())
+        record(run.id, "started", detail)
+      })
     },
     history(owner: string, id: string): HistoryEvent[] {
       if (loadRun(id).run.owner !== owner) fail("NOT_FOUND", "Unknown run")

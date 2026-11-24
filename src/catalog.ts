@@ -29,10 +29,10 @@ const graphSchema = z.array(z.discriminatedUnion("kind", [cellSchema, bindingSch
 
 export type NodeConfig = z.input<typeof graphSchema>[number]
 export type Cell = z.output<typeof cellSchema>
-export type RunnableCell = Cell & { profile: string }
+type RunnableCell = Cell & { profile: string }
 export type Binding = z.output<typeof bindingSchema>
 export type FieldSummary = { name: string; type: string; required: boolean }
-export type NodeMeta =
+type NodeMeta =
   | { kind: "cell"; id: string; title: string; description: string; searchNames: string }
   | {
       kind: "tool"
@@ -77,46 +77,68 @@ function searchableFields(schema: Tool["inputSchema"]): string {
 }
 
 // Every call can run as an MCP task, so tools default to `taskSupport: "optional"`.
-export function exposedTool(binding: Binding): Tool {
+function exposedTool(binding: Binding): Tool {
   return { ...binding.definition, name: binding.id, execution: { taskSupport: "optional", ...binding.definition.execution } }
 }
 
 // MCP's default JSON Schema dialect is 2020-12; many servers still declare draft-07.
-// Validators are shared by schema text, so publishing the same tools again compiles nothing new.
-function createValidators() {
+function createDialects(urlChars: number) {
   const options = { strict: false, addUsedSchema: false }
   const dialects = { draft07: new Ajv(options), latest: new Ajv2020(options) }
   for (const ajv of [dialects.draft07, dialects.latest]) {
     // Fast formats avoid backtracking regexes on untrusted arguments. The `url` regex is quadratic even in fast mode.
     formats.default(ajv, { mode: "fast" })
-    ajv.addFormat("url", (value: string) => value.length <= 2048 && /^(?:https?|ftp):\/\//i.test(value) && URL.canParse(value))
+    ajv.addFormat("url", (value: string) => value.length <= urlChars && /^(?:https?|ftp):\/\//i.test(value) && URL.canParse(value))
   }
-  return { dialects, compiled: new Map<string, ValidateFunction>() }
-}
-let validators = createValidators()
-
-function validator(schema: Tool["inputSchema"], nodeId: string): ValidateFunction {
-  const text = canonicalJson(schema)
-  const known = validators.compiled.get(text)
-  if (known) return known
-  if (validators.compiled.size >= 4096) validators = createValidators() // bounds memory when schemas never repeat
-  // `$schema` picks the dialect. Compiling without it accepts every spelling of the dialect's id.
-  const ajv = String(schema.$schema).includes("draft-07") ? validators.dialects.draft07 : validators.dialects.latest
-  const { $schema: _dialect, ...body } = schema
-  let check: ValidateFunction
-  try {
-    check = ajv.compile(body)
-  } catch (error) {
-    fail("INVALID_CONFIG", `Invalid JSON Schema in ${nodeId}: ` + (error instanceof Error ? error.message : String(error)))
-  }
-  if ("$async" in check) fail("INVALID_CONFIG", "Expected a synchronous JSON Schema")
-  validators.compiled.set(text, check)
-  return check
+  return dialects
 }
 
-export function compileGraph(config: unknown, adapters: ReadonlySet<string>, validateAdapters = true) {
+/** An app's JSON Schema validators, shared by schema text, so publishing the same tools again compiles nothing new. */
+export function createSchemas(limits: { schemaCacheSize: number; urlChars: number; argsErrorChars: number }) {
+  let dialects = createDialects(limits.urlChars)
+  let compiled = new Map<string, ValidateFunction>()
+
+  function validator(schema: Tool["inputSchema"], nodeId: string): ValidateFunction {
+    const text = canonicalJson(schema)
+    const known = compiled.get(text)
+    if (known) return known
+    if (compiled.size >= limits.schemaCacheSize) {
+      // Bounds memory when schemas never repeat: Ajv keeps what it compiled, so it starts afresh too.
+      dialects = createDialects(limits.urlChars)
+      compiled = new Map()
+    }
+    // `$schema` picks the dialect. Compiling without it accepts every spelling of the dialect's id.
+    const ajv = String(schema.$schema).includes("draft-07") ? dialects.draft07 : dialects.latest
+    const { $schema: _dialect, ...body } = schema
+    let check: ValidateFunction
+    try {
+      check = ajv.compile(body)
+    } catch (error) {
+      fail("INVALID_CONFIG", `Invalid JSON Schema in ${nodeId}: ` + (error instanceof Error ? error.message : String(error)))
+    }
+    if ("$async" in check) fail("INVALID_CONFIG", "Expected a synchronous JSON Schema")
+    compiled.set(text, check)
+    return check
+  }
+
+  // Ajv's messages name the field and the rule, never the value, so the model can fix its call.
+  function errors(check: ValidateFunction): string {
+    return dialects.latest.errorsText(check.errors, { dataVar: "arguments" }).slice(0, limits.argsErrorChars)
+  }
+
+  return { validator, errors }
+}
+export type Schemas = ReturnType<typeof createSchemas>
+
+/**
+ * Compiles a graph with an app's validators. Publishing also checks it against the host's adapters and the rules a
+ * stored revision may predate, so a stored revision always loads, and retiring an adapter fails only its own calls.
+ */
+export function compileGraph(config: unknown, schemas: Schemas, publishing?: { adapters: ReadonlySet<string> }) {
   const snapshot: JsonValue = normalizeJson(config)
-  const rows = graphSchema.parse(snapshot)
+  const parsed = graphSchema.safeParse(snapshot)
+  if (!parsed.success) fail("INVALID_CONFIG", "Invalid graph: " + z.prettifyError(parsed.error))
+  const rows = parsed.data
   const nodes = new Map(rows.map(node => [node.id, node]))
   if (nodes.size !== rows.length) fail("INVALID_CONFIG", "Duplicate node ID")
   for (const reserved of ["discover", "invoke"]) {
@@ -162,10 +184,15 @@ export function compileGraph(config: unknown, adapters: ReadonlySet<string>, val
         searchNames: [node.id, node.title, node.description].join(" ").toLowerCase(),
       })
     } else {
-      inputs.set(node.id, validator(node.definition.inputSchema, node.id))
-      if (node.definition.outputSchema) outputs.set(node.id, validator(node.definition.outputSchema, node.id))
-      if ("cell" in node.target) links = [runnableCell(node.target.cell).id]
-      else if (validateAdapters && !adapters.has(node.target.adapter)) {
+      inputs.set(node.id, schemas.validator(node.definition.inputSchema, node.id))
+      if (node.definition.outputSchema) outputs.set(node.id, schemas.validator(node.definition.outputSchema, node.id))
+      if ("cell" in node.target) {
+        links = [runnableCell(node.target.cell).id]
+        // A delegated run answers in text, so no structured output could ever pass the schema.
+        if (publishing && node.definition.outputSchema) {
+          fail("INVALID_CONFIG", "A tool bound to a cell has no outputSchema, as a delegated run answers in text: " + node.id)
+        }
+      } else if (publishing && !publishing.adapters.has(node.target.adapter)) {
         fail("INVALID_CONFIG", "Unknown adapter: " + node.target.adapter)
       }
       const exposed = Object.freeze(exposedTool(node))
@@ -236,8 +263,10 @@ export function compileGraph(config: unknown, adapters: ReadonlySet<string>, val
   // Whether allowed exports lead from entry to id. It walks up from id, so `allowed` is asked only about that chain,
   // not about the whole graph as `view` does.
   function reaches(entry: string, nodeId: string, allowed: (id: string) => boolean, seen = new Set<string>()): boolean {
-    if (seen.has(nodeId) || !allowed(nodeId)) return false
+    if (seen.has(nodeId)) return false
+    // Seen before it is asked about, so a node denied on one way up is not asked again on the next.
     seen.add(nodeId)
+    if (!allowed(nodeId)) return false
     return nodeId === entry || (exporters.get(nodeId) ?? []).some(parent => reaches(entry, parent, allowed, seen))
   }
 
@@ -267,8 +296,7 @@ export function compileGraph(config: unknown, adapters: ReadonlySet<string>, val
   function validateInput(nodeId: string, args: unknown) {
     const check = inputs.get(nodeId)
     if (check?.(args)) return
-    // Ajv's messages name the field and the rule, never the value, so the model can fix its call.
-    const detail = check ? ": " + validators.dialects.latest.errorsText(check.errors, { dataVar: "arguments" }).slice(0, 500) : ""
+    const detail = check ? ": " + schemas.errors(check) : ""
     fail("INVALID_ARGS", `Invalid arguments for ${nodeId}${detail}`)
   }
   function validateOutput(nodeId: string, value: unknown) {

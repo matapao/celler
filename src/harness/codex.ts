@@ -5,7 +5,7 @@
 import { Codex, type FileChangeItem, type ModelReasoningEffort, type ThreadEvent, type ThreadItem, type ThreadOptions, type Usage, type UserInput } from "@openai/codex-sdk"
 import { harnessLimits as L } from "../limits.js"
 import { VALUES } from "./programs.js"
-import { attachmentLinks, forThisSystem, type Turn } from "./runtime.js"
+import { forThisSystem, promptOf, saysSignedOut, type Turn } from "./runtime.js"
 import codexOnLinux from "./sandbox/codex.linux.js"
 import codexOnMacos from "./sandbox/codex.macos.js"
 import codexOnWindows from "./sandbox/codex.windows.js"
@@ -19,18 +19,21 @@ const CODEX_ON: Partial<Record<NodeJS.Platform, typeof codexOnMacos>> = { darwin
 const EFFORTS: ModelReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh", "max"]
 /** Files it is given as pictures to see, besides their links. */
 const PICTURES = /^image\/(png|jpeg|gif|webp)$/i
-/** An error that says Codex itself isn't signed in for the host. */
+/** What it says when it isn't signed in itself for the host. */
 const SIGN_IN_RE = /\b401\b|unauthori[sz]ed|not logged in|codex login/i
 /** A command as it ran it, through its shell (`/bin/zsh -lc 'npm test'`), as it was given (`npm test`). */
 const IN_SHELL = /^(?:\S*\/)?(?:ba|z)?sh -l?c (['"])([\s\S]*)\1$/
 
+/** A string as TOML writes it: as JSON does, with U+007F escaped too, which no TOML string holds as it is. */
+const tomlString = (s: string) => JSON.stringify(s).replaceAll("\x7f", "\\u007f")
+
 /** A value as TOML writes it inline, as Codex's `--config key=value` reads it: a JSON string is a TOML string. */
 function toml(value: unknown): string {
-  if (typeof value === "string") return JSON.stringify(value)
+  if (typeof value === "string") return tomlString(value)
   if (typeof value === "number" || typeof value === "boolean") return String(value)
   if (Array.isArray(value)) return `[${value.map(toml).join(", ")}]`
   if (typeof value === "object" && value !== null) {
-    const key = (k: string) => (/^[A-Za-z0-9_-]+$/.test(k) ? k : JSON.stringify(k))
+    const key = (k: string) => (/^[A-Za-z0-9_-]+$/.test(k) ? k : tomlString(k))
     const entries = Object.entries(value).map(([k, v]) => `${key(k)} = ${toml(v)}`)
     return entries.length ? `{ ${entries.join(", ")} }` : "{}"
   }
@@ -52,22 +55,23 @@ function settingsFor(t: Turn, values: Record<string, string>): string[] {
     values[name] = value
     return name
   }
-  // The host's servers at their addresses. They gate each call themselves: Codex doesn't ask about them again.
+  // The host's servers at their addresses. They gate each call themselves: Codex doesn't ask about them again. A call to
+  // them may wait for the person as long as celler lets it (limits.ts).
   const servers = Object.fromEntries(
-    spec.mcpServers.map((s) => [s.name, { url: s.url, env_http_headers: Object.fromEntries(Object.entries(s.headers).map(([name, value]) => [name, valueOf(value)])), default_tools_approval_mode: "approve" }]),
+    spec.mcpServers.map((s) => [s.name, { url: s.url, env_http_headers: Object.fromEntries(Object.entries(s.headers).map(([name, value]) => [name, valueOf(value)])), default_tools_approval_mode: "approve", tool_timeout_sec: L.mcpCallMs / 1000 }]),
   )
   return Object.entries({ ...own, mcp_servers: servers }).map(([k, v]) => `${k}=${toml(v)}`)
 }
 
 /** The cells' texts, then the person's words, set apart by a rule, and the files given with them; pictures to see too. */
 function inputOf(spec: RunSpec): UserInput[] {
-  const text = [spec.systemPrompt.trim(), [spec.prompt, attachmentLinks(spec.attachments)].filter(Boolean).join("\n\n")].filter(Boolean).join("\n\n---\n\n")
+  const text = [spec.systemPrompt.trim(), promptOf(spec)].filter(Boolean).join("\n\n---\n\n")
   const pictures = (spec.attachments ?? []).filter((a) => PICTURES.test(a.type)).map((a): UserInput => ({ type: "local_image", path: a.path }))
   return [{ type: "text", text }, ...pictures]
 }
 
 /** One run of Codex, to its end. */
-export async function runCodex(t: Turn, o: { models: Record<ModelTier, string>; home: string; signedOut: string }): Promise<RunResult> {
+export async function runCodex(t: Turn, o: { models: Record<ModelTier, string>; signedOut: string }): Promise<RunResult> {
   const { spec } = t
   const model = isTier(spec.model) ? o.models[spec.model] : spec.model
   const effort = EFFORTS.find((e) => e === spec.effort)
@@ -85,7 +89,7 @@ export async function runCodex(t: Turn, o: { models: Record<ModelTier, string>; 
   } catch (err) {
     report.broke(err)
   }
-  return report.ending(spec, o.signedOut)
+  return report.ending(o.signedOut)
 }
 
 /** One run as Codex reports it: its reply, its commands, edits and tool calls, its usage, what it couldn't write. */
@@ -168,7 +172,8 @@ class Report {
   }
 
   /** How the run ended: its reply, or why its turn didn't end; what it spent either way. */
-  ending(spec: RunSpec, signedOut: string): RunResult {
+  ending(signedOut: string): RunResult {
+    const { spec } = this.t
     const u = this.usage
     const result = {
       text: this.text,
@@ -183,7 +188,7 @@ class Report {
     const failed = (error: string, runtimeDown = false) => ({ ...result, ok: false, error: error.slice(-L.errorChars), runtimeDown })
     if (spec.resume && /no rollout found/i.test(why)) return failed(`Session ${spec.sessionId} could not be resumed: not found`)
     // Only a sign-in problem before anything was spent takes the whole runtime offline.
-    if (SIGN_IN_RE.test(why) && !u) return failed(signedOut, true)
+    if (saysSignedOut(why, SIGN_IN_RE) && !u) return failed(signedOut, true)
     return failed(why)
   }
 }

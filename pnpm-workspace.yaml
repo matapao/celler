@@ -3,3 +3,7 @@
 ignoredOptionalDependencies:
   - "@anthropic-ai/claude-agent-sdk-*"
   - "@openai/codex-*"
+# The Codex SDK writes its prompt to Codex with no listener for the pipe's errors: a Codex that ends before it reads a
+# long prompt would end the host. The patch adds the listener, and nothing else.
+patchedDependencies:
+  '@openai/codex-sdk@0.171.0': patches/@openai__codex-sdk@0.171.0.patch

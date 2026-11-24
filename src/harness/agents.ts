@@ -9,29 +9,32 @@ import path from "node:path"
 import { agentVersions, harnessLimits } from "../limits.js"
 import { runClaude } from "./claude.js"
 import { runCodex } from "./codex.js"
-import { codexProgram, findProgram, realProgram } from "./programs.js"
+import { codexProgram, findProgram, realProgram, type AgentProgram } from "./programs.js"
 import type { Turn } from "./runtime.js"
-import type { ClaudeWords, CodexWords, Host, ModelTier, RunResult, RuntimeHealth } from "./types.js"
-
-/** What the host says when an agent's program isn't there, and what it offers. */
-export type Missing = { missing: string; fix?: RuntimeHealth["fix"] }
+import type { ClaudeWords, CodexWords, Host, ModelTier, RunResult } from "./types.js"
 
 export interface Agent {
   kind: string
   name: string
   /** Its own program, as found, or what the host says when it isn't there. */
-  find(): string | Missing
+  find(): string | { missing: string }
   /** The program that runs for the one found, and the folders it needs on PATH. */
   started(found: string): { program: string; path: string[] }
   /** Made ready before each start: a run, its sign-in, its health check. */
   ready?(): void
   /** Added to its environment whenever it starts ('' removes a variable). */
   env(host: Host): Record<string, string>
-  /** Its version in what `--version` says, and the oldest that runs (limits.ts agentVersions). */
-  version: { of(said: string): string | null; oldest: string }
+  /**
+   * The variable naming its own home, where it keeps its settings and sign-in, when its environment has it: no run's
+   * folder is, holds or is in that home, and its commands never reach it (sandbox/places.ts).
+   */
+  homeVariable: string
+  /** The oldest version of it that runs, as its `--version` says it (limits.ts agentVersions). */
+  oldest: string
   /** Asked of its program; `yes` reads the answer: signed in, not, or null when it can't tell. */
   signedIn: { args: string[]; anyExit?: boolean; yes(answer: string | null): boolean | null }
-  login: { args: string[]; fix: RuntimeHealth["fix"]; signedOut: string; hint: string }
+  /** Its own sign-in, and what its health says when it isn't signed in. */
+  login: { args: string[]; signedOut: string }
   testRunMs: number
   /** It searches its MCP tools itself, loading only those it needs: a run lists them all to it, not celler's menu. */
   nativeDiscovery: boolean
@@ -40,21 +43,26 @@ export interface Agent {
 }
 
 /** The models a tier runs on, as each agent names them. */
-const MODELS: Record<"claude" | "codex", Record<ModelTier, string>> = {
+const MODELS: Record<AgentProgram, Record<ModelTier, string>> = {
   claude: { fast: "haiku", balanced: "sonnet", strong: "opus" },
   codex: { fast: "gpt-6-luna", balanced: "gpt-6.1-sol", strong: "gpt-6-astra" },
 }
 
 /** The model a tier runs on, as each agent names it. */
-export const tierModel = (agent: "claude" | "codex", tier: ModelTier): string => MODELS[agent][tier]
-
-/** The first version number in what a program says, "2.1.330" in "2.1.330 (Claude Code)". */
-const versionIn = (said: string) => /\d+\.\d+\.\d+/.exec(said)?.[0] ?? null
+export const tierModel = (agent: AgentProgram, tier: ModelTier): string => MODELS[agent][tier]
 
 // ---------------------------------------------------------------- Claude Code
 
 /** Its own sign-in only: a key or token from the shell would win over it, and an endpoint from the shell would get it. */
-const OWN_SIGN_IN = { ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "", ANTHROPIC_BASE_URL: "", CLAUDE_CODE_USE_BEDROCK: "", CLAUDE_CODE_USE_VERTEX: "" }
+const OWN_SIGN_IN = {
+  ANTHROPIC_API_KEY: "",
+  ANTHROPIC_AUTH_TOKEN: "",
+  ANTHROPIC_BASE_URL: "",
+  CLAUDE_CODE_OAUTH_TOKEN: "",
+  CLAUDE_CODE_USE_BEDROCK: "",
+  CLAUDE_CODE_USE_VERTEX: "",
+  CLAUDE_CODE_USE_FOUNDRY: "",
+}
 
 /** Claude Code, the person's own, through the Claude Agent SDK. */
 export function claudeAgent(o: { claude?: () => string | null; words: ClaudeWords }): Agent {
@@ -62,13 +70,15 @@ export function claudeAgent(o: { claude?: () => string | null; words: ClaudeWord
   return {
     kind: "claude-code",
     name: "Claude Code",
-    find: () => program() ?? { missing: o.words.noClaude, fix: "find-claude" },
+    find: () => program() ?? { missing: o.words.noClaude },
     started: (found) => ({ program: realProgram(found), path: [] }),
     // The host by its name, in the agent's requests, as the Agent SDK has it said.
     env: (host) => ({ ...OWN_SIGN_IN, CLAUDE_AGENT_SDK_CLIENT_APP: `${host.client.name}/${host.client.version}` }),
-    version: { of: versionIn, oldest: agentVersions.claude },
-    signedIn: { args: ["auth", "status", "--json"], anyExit: true, yes: (answer) => loggedIn(answer) },
-    login: { args: ["auth", "login", "--claudeai"], fix: "login", signedOut: "not logged in to Claude", hint: o.words.login },
+    // Where the person keeps its settings and sign-in, when not in their home (programs.ts keeps it for its runs).
+    homeVariable: "CLAUDE_CONFIG_DIR",
+    oldest: agentVersions.claude,
+    signedIn: { args: ["auth", "status", "--json"], anyExit: true, yes: loggedIn },
+    login: { args: ["auth", "login", "--claudeai"], signedOut: "not logged in to Claude" },
     testRunMs: harnessLimits.claudeTestRunMs,
     // Its ToolSearch.
     nativeDiscovery: true,
@@ -90,6 +100,9 @@ function loggedIn(answer: string | null): boolean | null {
 /** The `config.toml` of the host's Codex home: its sign-in kept in a file there, not the person's own. */
 export const CODEX_HOME_CONFIG = 'cli_auth_credentials_store = "file"\n'
 
+/** Its own sign-in only, in its home: a key or token from the shell would win over it, and an endpoint from the shell would get it. */
+const CODEX_OWN_SIGN_IN = { OPENAI_API_KEY: "", CODEX_API_KEY: "", CODEX_ACCESS_TOKEN: "", OPENAI_BASE_URL: "" }
+
 /**
  * Codex, the person's own CLI, through the Codex SDK, in the host's Codex home (`home`): its sign-in and its sessions
  * are kept there, and as no folder is trusted there, Codex loads no folder's own settings.
@@ -99,20 +112,22 @@ export function codexAgent(o: { codex?: () => string | null; home: string; words
   return {
     kind: "codex",
     name: "Codex",
-    find: () => program() ?? { missing: `Codex wasn't found on this computer. ${o.words.install}`, fix: "find-codex" },
+    find: () => program() ?? { missing: `Codex wasn't found on this computer. ${o.words.install}` },
     started: codexProgram,
     ready: () => {
-      mkdirSync(o.home, { recursive: true })
+      // Its sign-in is kept there: made for its owner alone.
+      mkdirSync(o.home, { recursive: true, mode: 0o700 })
       const file = path.join(o.home, "config.toml")
       if (!existsSync(file) || readFileSync(file, "utf8") !== CODEX_HOME_CONFIG) writeFileSync(file, CODEX_HOME_CONFIG)
     },
-    env: () => ({ CODEX_HOME: o.home }),
-    version: { of: versionIn, oldest: agentVersions.codex },
+    env: () => ({ ...CODEX_OWN_SIGN_IN, CODEX_HOME: o.home }),
+    homeVariable: "CODEX_HOME",
+    oldest: agentVersions.codex,
     signedIn: { args: ["login", "status"], yes: (answer) => answer !== null },
-    login: { args: ["login"], fix: "login-codex", signedOut: o.words.signedOut, hint: o.words.login },
+    login: { args: ["login"], signedOut: o.words.signedOut },
     testRunMs: harnessLimits.codexTestRunMs,
     // Its tool_search, over MCP tools it always defers.
     nativeDiscovery: true,
-    run: (turn) => runCodex(turn, { models: MODELS.codex, home: o.home, signedOut: o.words.login }),
+    run: (turn) => runCodex(turn, { models: MODELS.codex, signedOut: o.words.login }),
   }
 }

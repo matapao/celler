@@ -1,9 +1,9 @@
 import type { ApprovalState, RunStatus, Write } from "./store.js"
 
 // What a reviewer could not see: controls, format characters (bidi, zero-width, tag), private-use, unassigned and
-// surrogate code points, separators, and what Unicode says shows nothing at all (variation selectors, which can carry a
-// byte each after any character, and fillers).
-const INVISIBLE = "[\\p{C}\\p{Z}\\p{Default_Ignorable_Code_Point}]"
+// surrogate code points, separators, what Unicode says shows nothing at all (variation selectors, which can carry a
+// byte each after any character, and fillers), and the symbols drawn blank: the empty braille cell and the null notehead.
+const INVISIBLE = "[\\p{C}\\p{Z}\\p{Default_Ignorable_Code_Point}\\u2800\\u{1D159}]"
 const invisibleBut = (shown: string) => new RegExp(`(?![${shown}])${INVISIBLE}`, "gu")
 // In the packet's content, laid out in lines, the plain space, tab, newline and carriage return show; in a file's name
 // or media type, on one line, only the plain space does.
@@ -13,7 +13,9 @@ const HIDDEN_IN_NAME = invisibleBut(" ")
 const LONG_SPACES = /(?<=\S) {16,}/g
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
 
-const activeUrls = new WeakMap<HTMLElement, string[]>()
+// Each view's files' object URLs, and whether the view has been seen in the page: they are freed when it shows
+// something else, or once it has been in the page and left it. One drawn before it is put in the page keeps them.
+const views = new Map<HTMLElement, { urls: string[]; seen: boolean }>()
 
 function escapeChar(ch: string): string {
   const code = ch.codePointAt(0)!
@@ -31,7 +33,7 @@ function reveal(text: string, hidden = HIDDEN) {
 
 function sanitizeFilename(name: string): string {
   const base = name.split(/[/\\]/).pop() ?? ""
-  const cleaned = base.replace(HIDDEN_IN_NAME, "_").replace(/^\.+/, "").trim()
+  const cleaned = base.replace(HIDDEN_IN_NAME, "_").replace(/^[ .]+|[ .]+$/g, "")
   return cleaned.slice(0, 255) || "attachment"
 }
 
@@ -49,15 +51,17 @@ function decodeBase64(value: string): Uint8Array<ArrayBuffer> {
   return bytes
 }
 
-function revokeElementUrls(element: HTMLElement) {
-  const urls = activeUrls.get(element)
-  if (!urls) return
-  for (const url of urls) URL.revokeObjectURL(url)
-  activeUrls.delete(element)
+function revokeUrls(element: HTMLElement) {
+  for (const url of views.get(element)?.urls ?? []) URL.revokeObjectURL(url)
+  views.delete(element)
 }
 
 export function showWrite(element: HTMLElement, write: Write) {
-  revokeElementUrls(element)
+  revokeUrls(element)
+  for (const [view, shown] of views) {
+    if (view.isConnected) shown.seen = true
+    else if (shown.seen) revokeUrls(view)
+  }
   const { files, ...details } = write
   // Each file as it is sent: its name and media type as they are, with what can't be seen marked too.
   const attachments = files.map((file) => ({ file, name: reveal(file.name, HIDDEN_IN_NAME), mediaType: reveal(file.mediaType, HIDDEN_IN_NAME) }))
@@ -92,7 +96,7 @@ export function showWrite(element: HTMLElement, write: Write) {
     line.append(link)
     element.append(line)
   }
-  if (createdUrls.length) activeUrls.set(element, createdUrls)
+  if (createdUrls.length) views.set(element, { urls: createdUrls, seen: element.isConnected })
 }
 
 export function showApproval(

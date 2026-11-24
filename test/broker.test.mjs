@@ -83,3 +83,51 @@ test("launches never hold workspace slots, and a broker may answer before readin
   const written = await early.adapters.get("fs.write").call(run, { path: "big.txt", text: "x".repeat(1024 * 1024) }, AbortSignal.timeout(5000))
   assert.deepEqual(written, text("early"))
 })
+
+const alive = pid => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+test("an aborted call stops a broker that ignores SIGTERM, and frees its slot", { timeout: 4000 }, async t => {
+  // It ignores SIGTERM and never answers, except for the path "quick".
+  const script = `
+    process.on("SIGTERM", () => {})
+    process.stderr.write(process.pid + "\\n")
+    let input = ""
+    process.stdin.on("data", data => { input += data }).on("end", () => {
+      if (JSON.parse(input).args.path === "quick") process.stdout.write(JSON.stringify({ content: [] }))
+      else setInterval(() => {}, 1000)
+    })
+  `
+  const pids = []
+  const { adapters } = createBroker({
+    executable: process.execPath, args: ["-e", script], killTimeoutMs: 100, maxConcurrency: 1,
+    onStderr: chunk => pids.push(...String(chunk).split("\n").filter(Boolean).map(Number)),
+  }, () => true)
+  t.after(() => { for (const pid of pids) if (alive(pid)) process.kill(pid, "SIGKILL") })
+  const run = { id: "r1", owner: "alice", revision: "rev", entry: "root", workspace: "ws", parent: null }
+
+  const controller = new AbortController()
+  const stuck = adapters.get("fs.read").call(run, { path: "stuck" }, controller.signal)
+  while (pids.length === 0) await new Promise(resolve => setTimeout(resolve, 10))
+  controller.abort()
+  await assert.rejects(stuck, { name: "AbortError" })
+  // Its one slot is free at once, and the broker is killed once killTimeoutMs has passed.
+  assert.deepEqual(await adapters.get("fs.read").call(run, { path: "quick" }, AbortSignal.timeout(2000)), { content: [] })
+  await new Promise(resolve => setTimeout(resolve, 500))
+  assert.equal(alive(pids[0]), false)
+})
+
+test("a broker that answers with something other than a tool result fails in celler's words", async () => {
+  const run = { id: "r1", owner: "alice", revision: "rev", entry: "root", workspace: "ws", parent: null }
+  for (const output of ["not json", JSON.stringify({ content: 1 })]) {
+    const { adapters } = createBroker({ executable: process.execPath, args: ["-e", `process.stdout.write(${JSON.stringify(output)})`] }, () => true)
+    await assert.rejects(adapters.get("fs.read").call(run, { path: "x" }, AbortSignal.timeout(5000)),
+      error => error.name === "CellerError" && error.code === "BROKER_ERROR" && /^Broker result/.test(error.message))
+  }
+})

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url"
 import { setTimeout as delay } from "node:timers/promises"
 import { CallToolResultSchema, CreateTaskResultSchema } from "@modelcontextprotocol/sdk/types.js"
 import { createApp } from "celler"
+import { appLimits } from "../dist/limits.js"
 import { cell, memoryDatabase, object, refused, request, text, tool, until, withClient } from "./support.mjs"
 
 const packet = value => ({
@@ -326,4 +327,230 @@ test("a task-capable client gets a task handle, collects the approved result, an
     tool("send", { adapter: "delivery" }, { inputSchema: object({ message: { type: "string" } }) }),
     tool("slow", { adapter: "quick" }, { execution: { taskSupport: "required" } })])
   assert.deepEqual(await app.start(request(revision)), text("done"))
+})
+
+/** An approval its run staged, with verify held open until `open()`: a run that stays until it is ended, or leaves. */
+async function heldInVerify(t, { stays }) {
+  const held = { allowed: true, sent: [], verifying: false }
+  const opened = new Promise(resolve => { held.open = resolve })
+  const app = createApp({ database: memoryDatabase(t), adapters: new Map([["delivery", {
+    prepare: async (_run, args) => packet(String(args.message)),
+    verify: async () => { held.verifying = true; await opened },
+    send: async (_run, write) => { held.sent.push(write); return text("sent") },
+  }]]), platform: {
+    allowed: (_run, id) => id !== "send" || held.allowed,
+    launch: (spec, connect, signal) => withClient(connect, async client => {
+      held.run = spec.id
+      use(client, "k").catch(() => {})
+      await pending(app)
+      if (stays) await delay(60_000, undefined, { signal }).catch(() => {})
+      return text("left for a person")
+    }),
+  } })
+  held.running = app.start(request(app.publish(graph))).catch(error => error)
+  held.id = await pending(app)
+  if (!stays) await held.running
+  return { app, held }
+}
+
+test("what changes while verify runs stops the send: the run ended, the policy now denying it, or the caller's signal", async t => {
+  {
+    const { app, held } = await heldInVerify(t, { stays: true })
+    const approving = app.human.approve("alice", held.id)
+    await until(() => held.verifying)
+    app.end("alice", held.run)
+    held.open()
+    await assert.rejects(approving, /cancelled/)
+    assert.equal(app.human.review("alice", held.id).state, "pending")
+    assert.deepEqual(held.sent, [])
+    await held.running
+  }
+  {
+    const { app, held } = await heldInVerify(t, { stays: false })
+    const approving = app.human.approve("alice", held.id)
+    await until(() => held.verifying)
+    held.allowed = false
+    held.open()
+    await assert.rejects(approving, /outside this run/)
+    assert.equal(app.human.review("alice", held.id).state, "pending")
+    assert.deepEqual(held.sent, [])
+  }
+  {
+    const { app, held } = await heldInVerify(t, { stays: false })
+    held.open()
+    await assert.rejects(app.human.approve("alice", held.id, AbortSignal.abort()), { name: "AbortError" })
+    assert.equal(app.human.review("alice", held.id).state, "pending")
+    assert.deepEqual(held.sent, [])
+    // Approved again, it goes out once.
+    assert.deepEqual(await app.human.approve("alice", held.id), text("sent"))
+    assert.equal(held.sent.length, 1)
+  }
+})
+
+test("a delivery whose answer isn't JSON, or is over the inline limit, is still recorded as sent with its event", async t => {
+  const big = "x".repeat(10_000)
+  let runId
+  const app = createApp({ database: memoryDatabase(t), inlineLimit: 1024, adapters: new Map([["delivery", {
+    prepare: async (_run, args) => packet(String(args.message)),
+    send: async (_run, write) => write.content.message === "big" ? text(big) : { content: [], structuredContent: { n: 1n } },
+  }]]), platform: {
+    allowed: () => true,
+    launch: (spec, connect) => withClient(connect, async client => {
+      runId = spec.id
+      for (const [message, answer] of [["odd", /Invalid tool result/], ["big", /inline limit/]]) {
+        const call = use(client, message, message)
+        const id = await pending(app)
+        await assert.rejects(app.human.approve("alice", id))
+        assert.equal(app.human.review("alice", id).state, "sent")
+        await refused(call, answer)
+      }
+      return text("done")
+    }),
+  } })
+  assert.deepEqual(await app.start(request(app.publish(graph))), text("done"))
+  assert.equal(app.history("alice", runId).filter(event => event.kind === "approved").length, 2)
+})
+
+test("a state change and its event are one: an event that can't be written leaves the state as it was", async t => {
+  const database = memoryDatabase(t)
+  const failing = kind => database.exec(`CREATE TRIGGER fail_${kind} BEFORE INSERT ON events WHEN NEW.kind='${kind}' BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`)
+  const writable = kind => database.exec(`DROP TRIGGER fail_${kind}`)
+  let runId
+  const app = createApp({ database, adapters: new Map([["delivery", {
+    prepare: async (_run, args) => packet(String(args.message)),
+    send: async (_run, write) => {
+      if (write.content.message === "lost") throw Error("connection reset")
+      return text("sent")
+    },
+  }]]), platform: {
+    allowed: () => true,
+    launch: (spec, connect, signal) => withClient(connect, async client => {
+      runId = spec.id
+      for (const message of ["declined", "sent", "lost"]) use(client, message, message).catch(() => {})
+      await delay(60_000, undefined, { signal }).catch(() => {})
+      return text("ended")
+    }),
+  } })
+  const revision = app.publish(graph)
+  const runs = () => database.prepare("SELECT COUNT(*) AS count FROM runs").get().count
+  failing("started")
+  await assert.rejects(app.start(request(revision)), /disk is full/)
+  assert.equal(runs(), 0)
+  writable("started")
+
+  const running = app.start(request(revision)).catch(error => error)
+  await until(() => app.human.inbox("alice").length === 3)
+  const staged = message => app.human.inbox("alice").find(row => app.human.review("alice", row.id).write.content.message === message).id
+  const state = id => app.human.review("alice", id).state
+
+  failing("declined")
+  assert.throws(() => app.human.decline("alice", staged("declined")), /disk is full/)
+  assert.equal(state(staged("declined")), "pending")
+  writable("declined")
+
+  // Delivered, but not recorded as sent without its event: still started, which a restart makes unknown for the host.
+  const sent = staged("sent")
+  failing("approved")
+  await assert.rejects(app.human.approve("alice", sent), /disk is full/)
+  assert.equal(state(sent), "started")
+  writable("approved")
+
+  const lost = staged("lost")
+  failing("delivery_failed")
+  await assert.rejects(app.human.approve("alice", lost), /disk is full/)
+  assert.equal(state(lost), "started")
+  writable("delivery_failed")
+
+  failing("ended")
+  assert.throws(() => app.end("alice", runId), /disk is full/)
+  assert.equal(app.human.inbox("alice").find(row => row.id === staged("declined")).runStatus, "running")
+  assert.equal(app.history("alice", runId).some(event => event.kind === "ended"), false)
+  writable("ended")
+  app.end("alice", runId)
+  await running
+})
+
+test("a delivery the host settles as unknown, then as sent, answers the way its tool says it does", async t => {
+  const database = memoryDatabase(t)
+  let runId
+  const app = createApp({ database, adapters: new Map([["delivery", {
+    prepare: async (_run, args) => packet(String(args.message)),
+    send: async () => { throw Error("connection reset after the request was written") },
+  }]]), platform: {
+    allowed: () => true,
+    launch: (spec, connect) => withClient(connect, async client => {
+      runId = spec.id
+      use(client, "k1").catch(() => {})
+      await pending(app)
+      return text("left for a person")
+    }),
+  } })
+  const revision = app.publish([cell("root", ["send"]), tool("send", { adapter: "delivery" }, {
+    inputSchema: object({ message: { type: "string" } }), outputSchema: object({ id: { type: "string" } }),
+  })])
+  await app.start(request(revision))
+  const id = app.human.inbox("alice")[0].id
+  await assert.rejects(app.human.approve("alice", id), /connection reset/)
+  assert.throws(() => app.human.reconcile("alice", id, "sent"), /structured output/)
+  assert.equal(app.human.review("alice", id).state, "unknown")
+  app.human.reconcile("alice", id, "sent", { ...text("delivered"), structuredContent: { id: "42" } })
+  await withClient(channel => app.reconnect("alice", runId, channel), async client => {
+    assert.deepEqual((await use(client, "k1")).structuredContent, { id: "42" })
+  })
+})
+
+test("a packet made once its run's caller has ended is never left for a person", async t => {
+  let preparing = false, release
+  const gate = new Promise(resolve => { release = resolve })
+  const app = createApp({ database: memoryDatabase(t), adapters: new Map([["delivery", {
+    prepare: async (_run, args) => { preparing = true; await gate; return packet(String(args.message)) },
+    send: async () => text("sent"),
+  }]]), platform: {
+    allowed: () => true,
+    launch: (spec, connect, signal) => withClient(connect, async client => {
+      if (spec.entry === "root") {
+        client.callTool({ name: "helper", arguments: {} }).catch(() => {})
+        await until(() => preparing)
+        return text("finished while its child prepares")
+      }
+      use(client, "k").catch(() => {})
+      await delay(60_000, undefined, { signal }).catch(() => {})
+      await delay(30) // an agent that takes a moment to stop
+      return text("child stopped")
+    }),
+  } })
+  const revision = app.publish([cell("root", ["helper"]), tool("helper", { cell: "child" }), cell("child", ["send"]),
+    tool("send", { adapter: "delivery" }, { inputSchema: object({ message: { type: "string" } }) })])
+  assert.deepEqual(await app.start(request(revision)), text("finished while its child prepares"))
+  release()
+  await delay(100)
+  assert.deepEqual(app.human.inbox("alice"), [])
+})
+
+test("a task is kept no longer than the app keeps one, whatever ttl its client asks, and a connection holds only so many", async t => {
+  const warnings = []
+  const warned = warning => { if (warning.name === "TimeoutOverflowWarning") warnings.push(warning.message) }
+  process.on("warning", warned)
+  t.after(() => process.off("warning", warned))
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const app = createApp({ database: memoryDatabase(t), maxTasks: 2, adapters: new Map([["slow", { call: async () => { await gate; return text("ok") } }]]), platform: {
+    allowed: () => true,
+    launch: (_spec, connect) => withClient(connect, async client => {
+      const asTask = task => client.request({ method: "tools/call", params: { name: "slow", arguments: {}, task } }, CreateTaskResultSchema)
+      assert.equal((await asTask({})).task.ttl, appLimits.taskTtlMs)
+      // Longer than a timer takes: the app's own ttl, so it is still there a moment later.
+      const long = (await asTask({ ttl: 2 ** 31 })).task
+      assert.equal(long.ttl, appLimits.taskTtlMs)
+      await delay(20)
+      assert.equal((await client.experimental.tasks.getTask(long.taskId)).status, "working")
+      await assert.rejects(asTask({ ttl: 1000 }), /Too many tasks/)
+      release()
+      assert.deepEqual((await client.experimental.tasks.getTaskResult(long.taskId, CallToolResultSchema)).content, text("ok").content)
+      return text("done")
+    }),
+  } })
+  assert.deepEqual(await app.start(request(app.publish([cell("root", ["slow"]), tool("slow", { adapter: "slow" })]))), text("done"))
+  await delay(10)
+  assert.deepEqual(warnings, [])
 })

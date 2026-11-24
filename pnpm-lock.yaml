@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@openai/codex-sdk@0.171.0': 01ce96f55aa26fe22812325e06278a0491f1c69eef0080f57200c68a216b58f8
+
 importers:
 
   .:
@@ -16,7 +19,7 @@ importers:
         version: 1.32.2(zod@4.6.7)
       '@openai/codex-sdk':
         specifier: 0.171.0
-        version: 0.171.0
+        version: 0.171.0(patch_hash=01ce96f55aa26fe22812325e06278a0491f1c69eef0080f57200c68a216b58f8)
       ajv:
         specifier: 8.20.0
         version: 8.20.0
@@ -635,7 +638,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@openai/codex-sdk@0.171.0':
+  '@openai/codex-sdk@0.171.0(patch_hash=01ce96f55aa26fe22812325e06278a0491f1c69eef0080f57200c68a216b58f8)':
     dependencies:
       '@openai/codex': 0.171.0
 

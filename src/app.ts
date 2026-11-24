@@ -8,8 +8,8 @@ import {
   CallToolRequestSchema, CallToolResultSchema, ErrorCode, ListToolsRequestSchema, McpError,
 } from "@modelcontextprotocol/sdk/types.js"
 import type { CallToolResult, Task, Tool } from "@modelcontextprotocol/sdk/types.js"
-import { compileGraph, type Binding, type Graph, type Cell } from "./catalog.js"
-import { discover, discoverTool, invocation, invokeTool } from "./discovery.js"
+import { compileGraph, createSchemas, type Binding, type Graph, type Cell } from "./catalog.js"
+import { createDiscovery, invocation, invokeTool } from "./discovery.js"
 import { fail, parseWith, CellerError } from "./errors.js"
 import { canonicalJson, normalizeJson } from "./json.js"
 import { appLimits, withLimits } from "./limits.js"
@@ -38,6 +38,11 @@ export type Platform = {
   launch(spec: Run & { profile: string; context: Cell["context"]; input: unknown },
     connect: (transport: Transport, nativeDiscovery?: boolean) => Promise<void>,
     signal: AbortSignal): Promise<CallToolResult>
+  /**
+   * One of the run's calls waits for a person's decision in the inbox, until the release it returns. A platform whose
+   * runs keep a clock stops it meanwhile: the person's time isn't the run's.
+   */
+  waiting?(run: Run): () => void
 }
 
 export type Start = Pick<Run, "owner" | "revision" | "entry" | "workspace"> & { input: unknown }
@@ -72,21 +77,14 @@ function createLru<V>(limit: number) {
   }
 }
 
-function checkedResult(current: Graph, id: string, value: unknown): CallToolResult {
-  const parsed = CallToolResultSchema.safeParse(value)
-  if (!parsed.success) fail("INVALID_OUTPUT", "Invalid tool result for " + id)
-  if (!parsed.data.isError) current.validateOutput(id, parsed.data.structuredContent)
-  return parsed.data
-}
-
 const hash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex")
 const codeOf = (error: unknown) => (error instanceof CellerError ? error.code : undefined)
 
 /** The client's own key for a call, if it gave one: a malformed one is its mistake, answered as a protocol error. */
-function callIdOf(meta: Record<string, unknown> | undefined): string | undefined {
+function callIdOf(meta: Record<string, unknown> | undefined, maxChars: number): string | undefined {
   const key = meta?.["celler/call-id"]
   if (key === undefined) return undefined
-  if (typeof key !== "string" || key.length === 0 || key.length > 128 || /[\x00-\x1f\x7f]/.test(key)) {
+  if (typeof key !== "string" || key.length === 0 || key.length > maxChars || /[\x00-\x1f\x7f]/.test(key)) {
     throw new McpError(ErrorCode.InvalidParams, "Invalid celler/call-id metadata key")
   }
   return key
@@ -113,23 +111,35 @@ export function createApp(options: AppOptions) {
   const { database, platform, adapters: registry } = options
   const limits = withLimits(appLimits, options)
   const store = openStore(database, limits)
-  const adapterIds = () => new Set(registry.keys())
+  const schemas = createSchemas(limits)
+  const discovery = createDiscovery(limits)
   const graphs = createLru<Graph>(limits.graphCacheSize)
-  const runCache = createLru<{ run: Run; grants: ReadonlySet<string> }>(256)
+  const runCache = createLru<{ run: Run; grants: ReadonlySet<string> }>(limits.runCacheSize)
   const activeCalls = new Map<string, number>() // run id → tool calls in flight
   const activeRuns = new Map<string, number>() // root run id → runs in flight in its delegation tree
   const lifetimes = new Map<string, AbortController>() // run id → ends everything the run owns
-  const delegations = new Map<string, Map<string, Promise<CallToolResult>>>() // run id → its uncollected children
+  // run id → its uncollected children, by tool and call key, each with its arguments' hash
+  const delegations = new Map<string, Map<string, { args: string; result: Promise<CallToolResult> }>>()
   const connections = new Map<string, Set<Server>>() // run id → its open MCP connections
 
   function graph(revision: string) {
     let current = graphs.get(revision)
     if (!current) {
-      // Stored revisions skip the adapter check, so retiring an adapter fails only the calls that use it.
-      current = compileGraph(store.revision(revision), adapterIds(), false)
+      current = compileGraph(store.revision(revision), schemas)
       graphs.set(revision, current)
     }
     return current
+  }
+
+  /** A tool's answer, as the harness gets it: a tool result, within the inline limit, with the output it declares. */
+  function checkedResult(current: Graph, id: string, value: unknown): CallToolResult {
+    const parsed = CallToolResultSchema.safeParse(value)
+    if (!parsed.success) fail("INVALID_OUTPUT", "Invalid tool result for " + id)
+    if (Buffer.byteLength(JSON.stringify(parsed.data)) > limits.inlineLimit) {
+      fail("LIMIT_EXCEEDED", "Result exceeds the inline limit: " + id)
+    }
+    if (!parsed.data.isError) current.validateOutput(id, parsed.data.structuredContent)
+    return parsed.data
   }
 
   function loadRunCached(id: string) {
@@ -208,35 +218,38 @@ export function createApp(options: AppOptions) {
   async function startRun(request: Start, signal: AbortSignal, parent: Run["parent"]): Promise<CallToolResult> {
     signal.throwIfAborted()
     const input = normalizeJson(request.input)
+    if (Buffer.byteLength(JSON.stringify(input)) > limits.inlineLimit) fail("LIMIT_EXCEEDED", "Input exceeds the inline limit")
     const { input: _raw, ...settings } = request
     const run = freezeRun({ ...settings, id: randomUUID(), parent })
     const current = graph(run.revision)
     const entry = current.runnableCell(run.entry)
 
-    // Cap the depth, and keep denied whatever an ancestor could reach but was denied.
+    // Cap the depth, and keep denied whatever an ancestor could reach but may not use now: what its live view, its
+    // grants and the policy's word as it stands, leaves out.
     const deniedByAncestors = new Set<string>()
     let depth = 0
     for (let ancestor = parent; ancestor;) {
       if (++depth > limits.maxDepth) fail("LIMIT_EXCEEDED", "Maximum delegation depth exceeded")
-      const loaded = loadRunCached(ancestor.run)
-      for (const id of graph(loaded.run.revision).staticReachable(loaded.run.entry)) {
-        if (!loaded.grants.has(id)) deniedByAncestors.add(id)
+      const caller = loadRunCached(ancestor.run).run
+      const callerGraph = graph(caller.revision)
+      const usable = callerGraph.view(caller.entry, access(caller))
+      for (const id of callerGraph.staticReachable(caller.entry)) {
+        if (!usable.has(id)) deniedByAncestors.add(id)
       }
-      ancestor = loaded.run.parent
+      ancestor = caller.parent
     }
 
-    // Policy is asked only about what this cell can reach, so rules can be scoped to cells.
-    const grants = [...current.staticReachable(entry.id)]
-      .filter(id => !deniedByAncestors.has(id) && platform.allowed(run, id))
-    if (!grants.includes(entry.id)) fail("DENIED", "Cell denied: " + entry.id)
+    // Policy is asked only about what this cell can reach, so rules can be scoped to cells. A denied cell stops what
+    // it exports, as it does in every listing.
+    const reachable = current.view(entry.id, id => !deniedByAncestors.has(id) && platform.allowed(run, id))
+    const grants = [...reachable.keys()]
 
     const release = admit(activeRuns, parent ? rootOf(parent.run) : run.id, limits.maxRuns,
       "Too many active runs in this delegation tree")
     const launchSignal = AbortSignal.any([signal, lifetime(run.id)])
     try {
-      store.saveRun(run, grants)
+      store.saveRun(run, grants, { entry: entry.id, parent })
       runCache.set(run.id, { run, grants: new Set(grants) })
-      store.record(run.id, "started", { entry: entry.id, parent })
       const raw = await platform.launch(
         { ...run, profile: entry.profile, context: structuredClone(entry.context), input },
         (channel, native) => connect(run, channel, native), launchSignal)
@@ -257,21 +270,25 @@ export function createApp(options: AppOptions) {
   }
 
   // A delegated run belongs to the calling run, not to the request: a caller that stops waiting only detaches, and a
-  // retry with the same key and arguments joins the child or collects its result.
+  // retry with the same key and arguments joins the child or collects its result. The same key with other arguments
+  // is the caller's mistake, as it is for an approval.
   async function delegate(
     run: Run, tool: string, cell: string, args: Args, key: string, signal: AbortSignal, heartbeat?: () => void,
   ): Promise<CallToolResult> {
-    const calls = delegations.get(run.id) ?? new Map<string, Promise<CallToolResult>>()
+    const calls = delegations.get(run.id) ?? new Map<string, { args: string; result: Promise<CallToolResult> }>()
     delegations.set(run.id, calls)
-    const slot = hash([tool, key, args])
+    const slot = hash([tool, key])
+    const argsHash = hash(args)
     let child = calls.get(slot)
+    if (child && child.args !== argsHash) fail("KEY_CONFLICT", "Call key reused with different arguments")
     if (!child) {
       const started = startRun({ owner: run.owner, revision: run.revision, workspace: run.workspace, entry: cell, input: args },
         lifetime(run.id), { run: run.id, tool, key })
-      started.catch(() => { if (calls.get(slot) === started) calls.delete(slot) }) // a failed child can be retried
-      calls.set(slot, (child = started))
+      const entry = { args: argsHash, result: started }
+      started.catch(() => { if (calls.get(slot) === entry) calls.delete(slot) }) // a failed child can be retried
+      calls.set(slot, (child = entry))
     }
-    const value = await waitFor(child, signal, heartbeat)
+    const value = await waitFor(child.result, signal, heartbeat)
     if (calls.get(slot) === child) calls.delete(slot) // collected: an identical later call is new work
     return value
   }
@@ -283,8 +300,20 @@ export function createApp(options: AppOptions) {
     const adapter = registry.get(node.target.adapter)
     if (!adapter) fail("UNAVAILABLE", "Adapter unavailable: " + node.target.adapter)
     if ("call" in adapter) return adapter.call(run, args, signal)
-    const approval = await store.stage(run, key, node.id, args, prepareSignal => adapter.prepare(run, args, prepareSignal), signal)
-    return waitFor(store.result(run.owner, approval, signal), signal, heartbeat)
+    const approval = await store.stage(run, key, node.id, args, async prepareSignal => {
+      const write = await adapter.prepare(run, args, prepareSignal)
+      // The run, or a caller up its chain, may have ended while the packet was made: then it is left for no one.
+      checkAncestors(run, true)
+      if (store.ended(run.id)) fail("RUN_ENDED", "Run has ended")
+      return write
+    }, signal)
+    // The run waits for the person until they decide, or the call is withdrawn or cut off: that time isn't the run's.
+    const release = platform.waiting?.(run)
+    try {
+      return await waitFor(store.result(run.owner, approval, signal), signal, heartbeat)
+    } finally {
+      release?.()
+    }
   }
 
   async function call(
@@ -308,7 +337,8 @@ export function createApp(options: AppOptions) {
       current.validateInput(id, args)
 
       if (ended) {
-        // An ended run can only collect the outcome of an approval it already staged.
+        // An ended run can only collect the outcome of an approval it already staged. Its clock is over, and no run it
+        // was delegated by waits on it any more: nothing is held for the person.
         const approval = store.existingApproval(run, key, id, args)
         if (!approval) fail("RUN_ENDED", "Run has ended")
         return checkedResult(current, id, await waitFor(store.result(run.owner, approval, signal), signal, heartbeat))
@@ -352,11 +382,11 @@ export function createApp(options: AppOptions) {
       }
       // Once a connection moves to discover and invoke it stays there, so the model's `invoke` calls keep working.
       if (!invokeAdvertised && (native || jsonBytes <= limits.discoveryBytes)) {
-        return { tools: [...tools, discoverTool] }
+        return { tools: [...tools, discovery.tool] }
       }
       invokeAdvertised = true
       const pins = new Set(current.cell(run.entry).pins)
-      return { tools: [...tools.filter(tool => pins.has(tool.name)), discoverTool, invokeTool] }
+      return { tools: [...tools.filter(tool => pins.has(tool.name)), discovery.tool, invokeTool] }
     }
 
     // The tools this connection is listed, in celler's words when the host's policy or the database fails: never raw
@@ -374,66 +404,81 @@ export function createApp(options: AppOptions) {
 
     server.setRequestHandler(ListToolsRequestSchema, (_request, extra) => list(extra.signal))
     server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
-      if (!advertised) list(extra.signal)
-      if (!advertised!.has(params.name)) throw new McpError(ErrorCode.InvalidParams, "Unknown tool: " + params.name)
-      const callId = callIdOf(params._meta)
-      // The request or task, the connection, or the run can end this call. Approvals and delegated runs outlive it.
-      const owned = store.ended(run.id) ? [] : [lifetime(run.id)]
-      // Whatever goes wrong from here, an adapter's or the host's own error too, the model reads in celler's words.
-      async function respond(signal: AbortSignal, heartbeat?: () => void): Promise<CallToolResult> {
-        try {
-          const args = params.arguments ?? {}
-          if (params.name === "discover") {
-            checkAncestors(run)
-            return { content: [{ type: "text", text: discover(current, run.entry, access(run), args, limits.discoveryBytes) }] }
+      // Before a call's own answer, as when the database fails as it begins, only this library's errors go out too.
+      try {
+        if (!advertised) list(extra.signal)
+        if (!advertised!.has(params.name)) throw new McpError(ErrorCode.InvalidParams, "Unknown tool: " + params.name)
+        const callId = callIdOf(params._meta, limits.callIdChars)
+        // The request or task, the connection, or the run can end this call. Approvals and delegated runs outlive it.
+        const owned = store.ended(run.id) ? [] : [lifetime(run.id)]
+        // Whatever goes wrong from here, an adapter's or the host's own error too, the model reads in celler's words.
+        async function respond(signal: AbortSignal, heartbeat?: () => void): Promise<CallToolResult> {
+          try {
+            const args = params.arguments ?? {}
+            if (params.name === "discover") {
+              checkAncestors(run)
+              return { content: [{ type: "text", text: discovery.discover(current, run.entry, access(run), args) }] }
+            }
+            const request = params.name === "invoke"
+              ? parseWith(invocation, "invoke arguments", args)
+              : { name: params.name, arguments: args }
+            // Without `celler/call-id`, the tool and arguments are the key, so a blind retry joins the first call's
+            // approval or child run.
+            const key = callId ?? hash([request.name, request.arguments])
+            return await call(run, request.name, request.arguments, key, signal, { heartbeat, asTask: !!params.task })
+          } catch (error) {
+            // Cut off by its run's end, a call hears that, never what its adapter threw as it stopped.
+            const runEnded = owned.some(lifetimeSignal => lifetimeSignal.aborted)
+            return refusal(runEnded ? new CellerError("RUN_ENDED", "Run has ended") : error)
           }
-          const request = params.name === "invoke"
-            ? parseWith(invocation, "invoke arguments", args)
-            : { name: params.name, arguments: args }
-          // Without `celler/call-id`, the tool and arguments are the key, so a blind retry joins the first call's
-          // approval or child run.
-          const key = callId ?? hash([request.name, request.arguments])
-          return await call(run, request.name, request.arguments, key, signal, { heartbeat, asTask: !!params.task })
-        } catch (error) {
-          if (signal.aborted) throw error
-          return refusal(error)
         }
-      }
 
-      if (!params.task) {
-        const progressToken = extra._meta?.progressToken
-        let progress = 0
-        const heartbeat = progressToken === undefined ? undefined : () => void extra.sendNotification({
-          method: "notifications/progress",
-          params: { progressToken, progress: ++progress, message: "Still working" },
-        }).catch(() => {})
-        return respond(AbortSignal.any([extra.signal, connection.signal, ...owned]), heartbeat)
+        if (!params.task) {
+          const progressToken = extra._meta?.progressToken
+          let progress = 0
+          const heartbeat = progressToken === undefined ? undefined : () => void extra.sendNotification({
+            method: "notifications/progress",
+            params: { progressToken, progress: ++progress, message: "Still working" },
+          }).catch(() => {})
+          return await respond(AbortSignal.any([extra.signal, connection.signal, ...owned]), heartbeat)
+        }
+        // A connection holds only so many tasks, none kept longer than the app keeps one: MCP lets the receiver say.
+        if (tasks.getAllTasks().length >= limits.maxTasks) fail("LIMIT_EXCEEDED", "Too many tasks on this connection")
+        const ttl = Math.min(params.task.ttl ?? limits.taskTtlMs, limits.taskTtlMs)
+        const task = await extra.taskStore!.createTask({ ttl })
+        const work = new AbortController()
+        tasks.work.set(task.taskId, work)
+        void respond(AbortSignal.any([work.signal, connection.signal, ...owned]))
+          .then(async result => {
+            // A cancelled task keeps its status; any other outcome is stored for tasks/result.
+            if (!work.signal.aborted) await extra.taskStore!.storeTaskResult(task.taskId, result.isError ? "failed" : "completed", result)
+          })
+          .catch(() => {})
+          .finally(() => tasks.work.delete(task.taskId))
+        return { task }
+      } catch (error) {
+        if (error instanceof McpError || error instanceof CellerError) throw error
+        fail("UNAVAILABLE", "Tool execution failed")
       }
-      const task = await extra.taskStore!.createTask({ ttl: params.task.ttl })
-      const work = new AbortController()
-      tasks.work.set(task.taskId, work)
-      void respond(AbortSignal.any([work.signal, connection.signal, ...owned]))
-        .catch(refusal)
-        .then(async result => {
-          // A cancelled task keeps its status; any other outcome is stored for tasks/result.
-          if (!work.signal.aborted) await extra.taskStore!.storeTaskResult(task.taskId, result.isError ? "failed" : "completed", result)
-        })
-        .catch(() => {})
-        .finally(() => tasks.work.delete(task.taskId))
-      return { task }
     })
 
     const group = connections.get(run.id) ?? new Set<Server>()
     connections.set(run.id, group)
     group.add(server)
-    server.onclose = () => {
+    function forget() {
       connection.abort()
       // Its tasks were this connection's alone: nothing can ask for them now, and their timers would outlive it.
       tasks.cleanup()
       group.delete(server)
       if (group.size === 0 && connections.get(run.id) === group) connections.delete(run.id)
     }
-    await server.connect(channel)
+    server.onclose = forget
+    try {
+      await server.connect(channel)
+    } catch (error) {
+      forget() // a connection that never started is no one's to tell
+      throw error
+    }
   }
 
   async function notifyToolsChanged(runId?: string) {
@@ -443,7 +488,7 @@ export function createApp(options: AppOptions) {
 
   return {
     publish(config: unknown) {
-      const current = compileGraph(config, adapterIds(), true)
+      const current = compileGraph(config, schemas, { adapters: new Set(registry.keys()) })
       const revision = store.saveRevision(current.snapshot)
       graphs.set(revision, current)
       return revision
@@ -472,25 +517,31 @@ export function createApp(options: AppOptions) {
       inbox: store.inbox,
       review: store.review,
       decline: store.decline,
-      /** Settles an `unknown` delivery after the host has checked the destination. */
+      /**
+       * Settles an `unknown` delivery after the host has checked the destination. What a run collects of one sent passes
+       * the checks a delivery's own answer does, so for a tool with an outputSchema the host gives that result.
+       */
       reconcile(owner: string, id: string, outcome: "sent" | "failed", result?: CallToolResult) {
-        const value = outcome === "sent" ? result ?? { content: [{ type: "text" as const, text: "Delivered (confirmed by the host)" }] } : undefined
+        let value: CallToolResult | undefined
+        if (outcome === "sent") {
+          const { run, tool } = store.review(owner, id)
+          const confirmed: CallToolResult = { content: [{ type: "text", text: "Delivered (confirmed by the host)" }] }
+          value = checkedResult(graph(run.revision), tool, result ?? confirmed)
+        }
         store.reconcile(owner, id, outcome, value)
       },
       async approve(owner: string, id: string, signal?: AbortSignal): Promise<CallToolResult> {
-        let check = (value: CallToolResult) => value
-        const value = await store.approve(owner, id, (run, tool) => {
+        const { value, run, tool } = await store.approve(owner, id, (run, tool) => {
           const node = binding(run, tool)
           const adapter = "adapter" in node.target ? registry.get(node.target.adapter) : undefined
           if (!adapter || !("send" in adapter)) fail("UNAVAILABLE", "Outbound adapter unavailable")
-          check = result => checkedResult(graph(run.revision), tool, result)
           return {
             verify: adapter.verify ? write => adapter.verify!(run, write) : undefined,
             send: (write, key, sendSignal) => adapter.send(run, write, key, sendSignal),
           }
         }, signal)
-        // The store saved the response as sent first, so a response that fails its schema keeps its receipt.
-        return check(value)
+        // The store saved the response as sent first, so a response that fails its checks keeps its receipt.
+        return checkedResult(graph(run.revision), tool, value)
       },
     },
   }

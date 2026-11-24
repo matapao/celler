@@ -1,4 +1,5 @@
-# The build and every test, on every push and pull request, on Node 24 (package.json's engines); holds no secrets.
+# The build and every test, on every push and pull request, on Node 24 (package.json's engines), on Linux and on macOS,
+# whose agents' sandboxes and folders' names differ; holds no secrets.
 
 name: Test
 
@@ -11,8 +12,12 @@ permissions:
 
 jobs:
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

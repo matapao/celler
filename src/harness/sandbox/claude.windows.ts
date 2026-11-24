@@ -7,9 +7,11 @@
 // - commands reach no network at all: everything outside the computer goes through the host's tools (MCP);
 // - they write only in the run's folder (only at work), its own scratch folder inside it, and its shell's own temporary
 //   folder, which its sandbox gives its commands and Claude Code can't do without (its working folder after each
-//   command); never the folder's own settings for the agents celler runs;
-// - they read the folder and the system, never the person's home (where the host keeps its data), other users' folders
-//   or the system's temporary folders, which other programs share; the proxies' values never reach them;
+//   command); never the folder's own settings for the agents celler runs, nor a repository's hooks and git settings
+//   there, which its sandbox keeps read-only itself;
+// - they read the folder and the system, never the person's home (where the host keeps its data), other users' folders,
+//   the system's temporary folders, which other programs share, or Claude Code's own settings and sign-in where the
+//   person keeps them (CLAUDE_CONFIG_DIR); the proxies' values never reach them;
 // - its own tools are the ones listed, none that reach outside the computer, and its file tools keep to the folder.
 
 import { AGENT_SETTINGS, type Places } from "./places.js"
@@ -27,9 +29,9 @@ export default function claudeOnWindows(p: Places, purpose: "work" | "read") {
       allowUnsandboxedCommands: false, // never a command outside it, even one it asks for
       autoAllowBashIfSandboxed: true, // inside it, commands go without asking the person
       filesystem: {
-        // Never read: the system's temporary folders. The person's home and other users' folders are closed by
-        // blockReadsOutsideWorkingDirectories below, Claude Code's own rule.
-        denyRead: p.temps,
+        // Never read: the system's temporary folders, and its own home (CLAUDE_CONFIG_DIR) wherever it is. The person's
+        // home and other users' folders are closed by blockReadsOutsideWorkingDirectories below, Claude Code's own rule.
+        denyRead: [...p.temps, ...p.agentHomes],
         // Read again: the folder (its scratch in it), the run's short folder (its shell's temporary one), PATH's folders
         // in the home, and what the host adds.
         allowRead: [p.folder, p.scratch.short, ...p.tools, ...p.readable],

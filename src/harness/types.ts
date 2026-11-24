@@ -28,7 +28,9 @@ export interface McpServerSpec {
   name: string
   /** A program to start ("stdio") is the host's to start: a run is refused one. */
   transport: "stdio" | "http" | "sse"
+  /** Never a secret in it: Codex is given it on its command line, which anyone on the computer can read. */
   url: string
+  /** Where its secrets go: they reach Claude Code in its first request and Codex in variables of its own. */
   headers: Record<string, string>
 }
 
@@ -45,10 +47,10 @@ export interface RunSpec {
   sessionId: string
   resume: boolean
   mcpServers: McpServerSpec[]
-  /** Puts what the agent asks to the person and waits; null when no one answered. Without it, every ask is declined. */
+  /** Puts what the agent asks to the person and waits; null when no one answered. Without it, no ask is answered. */
   ask?: (q: AgentAsk, signal: AbortSignal) => Promise<AskAnswer | null>
   /** Files given with the task, linked from the prompt. */
-  attachments?: { path: string; name: string; type: string; size: number }[]
+  attachments?: { path: string; name: string; type: string }[]
   /**
    * What the agent may do. At `work`, its own tools in its folder, its commands in its sandbox (sandbox/*.ts): it reads,
    * writes and organizes anything under the folder, and reaches no network, so everything outside goes through the
@@ -93,12 +95,17 @@ export interface RunHandle {
   pid?: number
   done: Promise<RunResult>
   cancel(): void
+  /**
+   * Stops the run's clock until the release it returns: while the person decides what the run waits on, such as one of
+   * its calls in the inbox. Its agent's own asks stop it too. A runtime that keeps no clock has none.
+   */
+  hold?(): () => void
 }
 
 export interface Runtime {
   /** "claude-code", "codex" or "simulated". */
   readonly kind: string
-  /** Its agent searches the run's tools itself, so the run lists them all to it (createApp's `nativeDiscovery`). */
+  /** Its agent searches the run's tools itself, so the run lists them all to it, not celler's menu. */
   readonly nativeDiscovery?: boolean
   run(spec: RunSpec, onProgress: (p: RunProgress) => void): RunHandle
   /** `deep` also test-runs a tiny prompt, as a model-only run (purpose `inference`): no tools, nothing of the person's. */
@@ -111,8 +118,8 @@ export interface RuntimeHealth {
   detail: string
   /** Where its program was found. */
   program?: string
-  /** What the host can offer: showing where the program is, or a sign-in. */
-  fix?: "find-claude" | "find-codex" | "login" | "login-codex"
+  /** What the host can offer: showing where the agent's program is, or the agent's own sign-in. */
+  fix?: "find" | "login"
 }
 
 /** An agent's own sign-in in progress: its page once printed, its end, and a code pasted back for a page that shows one. */
@@ -120,6 +127,8 @@ export interface AgentLogin {
   url: Promise<string | null>
   done: Promise<{ ok: boolean; error?: string }>
   sendCode(code: string): void
+  /** Called off: its program ends, and `done` with it. */
+  cancel(): void
 }
 
 /** One of an agent's own settings, by its own name, on the value it is on. */
@@ -129,16 +138,13 @@ export interface AgentSetting {
   value: string
 }
 
-/**
- * What an agent asks before it acts, with the options to pick from; or a form or page it asks for instead. An option
- * allows or rejects, once or from then on, in ACP's words for it: what an agent offers is what the person picks from.
- */
+/** What an agent asks before it acts, with the options to pick from; or a form or page it asks for instead. */
 export interface AgentAsk {
   call: string
   tool: string
   title: string
   input?: unknown
-  options: { optionId: string; name: string; kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" }[]
+  options: { optionId: string; name: string; kind: "allow_once" | "reject_once" }[]
   form?: { message: string; fields?: AgentFormField[]; url?: string }
 }
 

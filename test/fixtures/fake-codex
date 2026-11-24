@@ -2,7 +2,8 @@
 // A stand-in for Codex as the Codex SDK drives it (`codex exec --experimental-json`): no model is called. It says what
 // it was started with and given in FAKE_CODEX_LOG, and answers with Codex's own events: its thread, a command it ran,
 // a file it wrote, its reply and its usage. With FAKE_CODEX_TOOL, it first calls that tool on the MCP server in its
-// settings, each header's value from the variable the header names, and its reply ends with the tool's answer.
+// settings, each header's value from the variable the header names, and its reply ends with the tool's answer. With
+// FAKE_CODEX_EXIT_AT_ONCE, it ends before it reads its prompt, as Codex does with a setting it refuses.
 import { appendFileSync } from "node:fs"
 import path from "node:path"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
@@ -27,9 +28,13 @@ const logFile = process.env.FAKE_CODEX_LOG ?? path.join(cwd, "agent.jsonl")
 const log = (what, data) => appendFileSync(logFile, JSON.stringify({ what, data }) + "\n")
 const send = (event) => process.stdout.write(JSON.stringify(event) + "\n")
 
+if (process.env.FAKE_CODEX_EXIT_AT_ONCE) {
+  console.error("Error: a setting it refuses")
+  process.exit(2)
+}
 let prompt = ""
 for await (const chunk of process.stdin) prompt += chunk
-log("exec", { args, configs, model: one("--model") ?? null, cwd, resume, images: all("--image"), prompt, env: Object.keys(process.env).sort(), values: Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("CELLER_VALUE_"))), mark: process.env.HOST_RUN ?? null, home: process.env.CODEX_HOME ?? null })
+log("exec", { args, configs, model: one("--model") ?? null, cwd, resume, prompt, values: Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith("CELLER_VALUE_"))), mark: process.env.HOST_RUN ?? null, home: process.env.CODEX_HOME ?? null })
 
 if (resume === "missing") {
   console.error(`Error: thread/resume: thread/resume failed: no rollout found for thread id ${resume} (code -32600)`)
@@ -37,6 +42,11 @@ if (resume === "missing") {
 }
 send({ type: "thread.started", thread_id: resume ?? "fake-thread" })
 send({ type: "turn.started" })
+if (process.env.FAKE_CODEX_MCP_401) {
+  send({ type: "error", message: "MCP client for `github` failed to start: 401 Unauthorized" })
+  send({ type: "turn.failed", error: { message: "MCP server github: 401 Unauthorized" } })
+  process.exit(1)
+}
 if (process.env.FAKE_CODEX_SIGNED_OUT) {
   send({ type: "error", message: "Reconnecting... 1/5 (unexpected status 401 Unauthorized: Missing bearer or basic authentication in header)" })
   send({ type: "turn.failed", error: { message: "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header" } })

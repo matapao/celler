@@ -104,3 +104,53 @@ test("preview escapes BiDi spoofing, shows attachment names as they are sent, sa
   assert.ok(marks.startsWith("⚠ 4 hidden or invisible sequences"), marks)
   for (const mark of ["\\u{e016b}", "\\u{e0165}", "\\u{e0179}", "\\u3164"]) assert.ok(marks.includes(mark), mark)
 })
+
+let urlsMade = 0
+/** The DOM stand-in as a test's own document, with object URLs, each a name of its own, put back after the test. */
+function withDom(t) {
+  const { document, root } = mockDom()
+  const urls = { created: [], revoked: [] }
+  const saved = { document: globalThis.document, create: URL.createObjectURL, revoke: URL.revokeObjectURL }
+  globalThis.document = document
+  URL.createObjectURL = () => { const url = "blob:view/" + urlsMade++; urls.created.push(url); return url }
+  URL.revokeObjectURL = url => { urls.revoked.push(url) }
+  t.after(() => {
+    globalThis.document = saved.document
+    URL.createObjectURL = saved.create
+    URL.revokeObjectURL = saved.revoke
+  })
+  return { document, root, urls }
+}
+const plainWrite = { account: "acct", destination: "https://example.invalid/", operation: "POST", content: {}, files: [] }
+const file = name => ({ name, mediaType: "text/plain", base64: "eA==" })
+
+test("a file is never saved under a leading dot or around spaces, whatever comes first", t => {
+  const { root } = withDom(t)
+  showWrite(root, { ...plainWrite, files: [file(" .bashrc"), file(" .. "), file("report.pdf. "), file(". .profile")] })
+  assert.deepEqual(root.children.slice(1).map(line => line.children[0].download), ["bashrc", "attachment", "report.pdf", "profile"])
+})
+
+test("a blank braille pattern and a null notehead are marked like any character that shows nothing", t => {
+  const { root } = withDom(t)
+  showWrite(root, { ...plainWrite, content: { note: "Send $10" + "⠀".repeat(200) + "000\u{1D159}" } })
+  const shown = root.children[0].textContent
+  assert.ok(shown.startsWith("⚠ 201 hidden or invisible sequences"), shown.slice(0, 80))
+  assert.ok(shown.includes("\\u2800") && shown.includes("\\u{1d159}"))
+})
+
+test("a view taken out of the page frees its files' object URLs at the next render; one shown, or not yet put there, keeps them", t => {
+  const { document, urls } = withDom(t)
+  const first = Object.assign(document.createElement("div"), { isConnected: true })
+  const second = Object.assign(document.createElement("div"), { isConnected: true })
+  // Drawn first, put in the page after: a host may build its views that way.
+  const third = Object.assign(document.createElement("div"), { isConnected: false })
+  showWrite(first, { ...plainWrite, files: [file("a.txt")] })
+  showWrite(third, { ...plainWrite, files: [file("t.txt")] })
+  showWrite(second, { ...plainWrite, files: [file("b.txt")] })
+  const [ofFirst, ofThird, ofSecond] = urls.created
+  assert.deepEqual(urls.revoked.filter(url => urls.created.includes(url)), [])
+  first.isConnected = false
+  showWrite(second, { ...plainWrite, files: [file("c.txt")] })
+  assert.ok(urls.revoked.includes(ofFirst) && urls.revoked.includes(ofSecond))
+  assert.ok(!urls.revoked.includes(ofThird) && !urls.revoked.includes(urls.created[3]))
+})

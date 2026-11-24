@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { Readable, type Duplex } from "node:stream"
+import { Readable, addAbortSignal, type Duplex } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
-import { CallToolResultSchema, type Tool } from "@modelcontextprotocol/sdk/types.js"
+import { CallToolResultSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js"
 import type { Adapter, Platform } from "./app.js"
 import type { NodeConfig } from "./catalog.js"
 import { fail, CellerError } from "./errors.js"
@@ -31,12 +31,12 @@ const BASE64_PATTERN = "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/
 const READ_ONLY: Tool["annotations"] = { readOnlyHint: true, idempotentHint: true, openWorldHint: false }
 const DESTRUCTIVE: Tool["annotations"] = { readOnlyHint: false, destructiveHint: true, openWorldHint: false }
 const IDEMPOTENT_WRITE: Tool["annotations"] = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-const path = { type: "string", minLength: 1, maxLength: 4096, pattern: NO_NULL, description: "A path inside the workspace" }
 const fields = (properties: Record<string, object>, required = Object.keys(properties)) =>
   ({ type: "object" as const, additionalProperties: false, required, properties })
 
 // The workspace tools. Each runs the broker in `workspace` mode with its operation name and arguments.
-function operations(inlineLimit: number): Record<string, Operation> {
+function operations({ inlineLimit, pathChars, queryChars }: typeof brokerLimits): Record<string, Operation> {
+  const path = { type: "string", minLength: 1, maxLength: pathChars, pattern: NO_NULL, description: "A path inside the workspace" }
   return {
     list: { description: "List a directory in the workspace", annotations: READ_ONLY, inputSchema: fields({ path }) },
     read: { description: "Read a file in the workspace", annotations: READ_ONLY, inputSchema: fields({ path }) },
@@ -49,7 +49,7 @@ function operations(inlineLimit: number): Record<string, Operation> {
     stat: { description: "Get information about a path in the workspace", annotations: READ_ONLY, inputSchema: fields({ path }) },
     search: {
       description: "Search the workspace below a path", annotations: READ_ONLY,
-      inputSchema: fields({ path, query: { type: "string", maxLength: 4096, description: "What to search for" } }),
+      inputSchema: fields({ path, query: { type: "string", maxLength: queryChars, description: "What to search for" } }),
     },
     write: {
       description: "Write a file in the workspace from UTF-8 text or base64 bytes", annotations: DESTRUCTIVE,
@@ -68,6 +68,19 @@ function operations(inlineLimit: number): Record<string, Operation> {
       }),
     },
   }
+}
+
+/** What a broker printed, as a tool result: anything else is the broker's failure, in celler's words. */
+function brokerResult(output: string): CallToolResult {
+  let value: unknown
+  try {
+    value = JSON.parse(output)
+  } catch {
+    fail("BROKER_ERROR", "Broker result is not JSON")
+  }
+  const parsed = CallToolResultSchema.safeParse(value)
+  if (!parsed.success) fail("BROKER_ERROR", "Broker result is not a tool result")
+  return parsed.data
 }
 
 function createSemaphore(limit: number) {
@@ -148,14 +161,15 @@ export function createBroker(command: BrokerCommand, allowed: Platform["allowed"
       writeStdin.catch(() => {})
       const chunks: Buffer[] = []
       let bytes = 0
-      for await (const chunk of running.stdout!) {
+      // An abort ends the read too, so a broker that outlives SIGTERM with its output open is still stopped below.
+      for await (const chunk of addAbortSignal(signal, running.stdout!)) {
         bytes += chunk.length
         if (bytes > limits.inlineLimit) fail("LIMIT_EXCEEDED", "Broker result exceeds inline limit")
         chunks.push(chunk)
       }
       await exit
       await writeStdin
-      return CallToolResultSchema.parse(JSON.parse(Buffer.concat(chunks).toString()))
+      return brokerResult(Buffer.concat(chunks).toString())
     } finally {
       await transport?.close().catch(() => {})
       if (child) {
@@ -186,7 +200,7 @@ export function createBroker(command: BrokerCommand, allowed: Platform["allowed"
 
   const adapters = new Map<string, Adapter>()
   const bindings: NodeConfig[] = []
-  for (const [op, { description, annotations, inputSchema, wire }] of Object.entries(operations(limits.inlineLimit))) {
+  for (const [op, { description, annotations, inputSchema, wire }] of Object.entries(operations(limits))) {
     const id = "fs." + op
     adapters.set(id, {
       call: (run, args, signal) =>

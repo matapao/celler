@@ -1,11 +1,11 @@
 // Where a run's commands may go, which the settings files beside this one put into each harness's own words
-// (claude.*.ts, codex.*.ts): the run's folder, with its own scratch folder inside it, and none of the person's home or
-// the system's temporary folders. celler keeps no list of where secrets might be: the home is closed as a whole, and
-// PATH, which declares the person's programs, is what opens their folders in it again. These are facts about the run,
-// worked out once as it starts.
+// (claude.*.ts, codex.*.ts): the run's folder, with its own scratch folder inside it, and none of the person's home,
+// the system's temporary folders or the agent's own home. celler keeps no list of where secrets might be: the home is
+// closed as a whole, and PATH, which declares the person's programs, is what opens their folders in it again. These are
+// facts about the run, worked out once as it starts, each folder by its real name.
 
-import { mkdirSync, mkdtempSync, realpathSync, rmdirSync, statSync } from "node:fs"
-import { chmod, readdir, rm } from "node:fs/promises"
+import { lstatSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmod, lstat, readdir, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
@@ -19,10 +19,15 @@ export interface Places {
    * such limit, and it is the run's `tmp`. Made as it starts, removed after it.
    */
   scratch: { root: string; tmp: string; home: string; cache: string; short: string }
-  /** The system's temporary folders, which other programs share: never read or written. */
+  /** The system's temporary folders, and the person's own runtime ones, which other programs share: never read or written. */
   temps: string[]
   /** The person's home folder, where the host keeps its data too: never read, but for the run's folder if it is in it. */
   home: string
+  /**
+   * The agent's own home, where it keeps its settings and sign-in, when it is told one (Codex's CODEX_HOME, Claude
+   * Code's CLAUDE_CONFIG_DIR): never read or written, wherever it is.
+   */
+  agentHomes: string[]
   /** The folders on PATH inside the person's home, as PATH declares them: their programs run. */
   tools: string[]
   /** What the host adds, read only: a worktree's repository data. */
@@ -56,21 +61,44 @@ export function outside(file: string, folder: string): boolean {
 }
 
 /** Where in its folder a run's scratch folders are made, each its own: `<folder>/.celler/run-…`. */
-export const SCRATCH = ".celler"
+const SCRATCH = ".celler"
 
 /**
  * A run's own scratch folder, made inside its folder (SCRATCH), and its short one, in /tmp on macOS and Linux, which
- * only its owner may use: there is no other place it may keep anything.
+ * only its owner may use: there is no other place it may keep anything. git leaves the scratch alone, by a .gitignore
+ * of its own, so a commit made in the folder holds none of it, nor does a search of the folder's files.
  */
 export function scratchFor(folder: string): Places["scratch"] {
   const parent = path.join(folder, SCRATCH)
   mkdirSync(parent, { recursive: true })
+  // Inside the folder as it really is, never through a link a run or a repository put in its place: the run's commands
+  // may write in their scratch, so one made through a link would open where it leads to them. Nothing is made through a
+  // link found there, and one put there as the scratch is made is found after, and what was made taken back.
+  const leadsOutside = () => new Error(`${parent} leads outside the run's folder: a run's scratch is made only inside it`)
+  if (!lstatSync(parent).isDirectory()) throw leadsOutside()
   const root = mkdtempSync(path.join(parent, "run-"))
+  if (!inside(realpathSync(folder), realpathSync(root))) {
+    rmdirSync(root)
+    throw leadsOutside()
+  }
   const tmp = path.join(root, "tmp")
-  const short = process.platform === "win32" ? tmp : mkdtempSync(path.join(realpathSync("/tmp"), "celler-"))
-  const scratch = { root, tmp, home: path.join(root, "home"), cache: path.join(root, "cache"), short }
-  for (const dir of [scratch.tmp, scratch.home, scratch.cache]) mkdirSync(dir)
-  return scratch
+  let short: string | undefined
+  try {
+    writeFileSync(path.join(root, ".gitignore"), "*\n")
+    short = process.platform === "win32" ? tmp : mkdtempSync(path.join(realpathSync("/tmp"), "celler-"))
+    const scratch = { root, tmp, home: path.join(root, "home"), cache: path.join(root, "cache"), short }
+    for (const dir of [scratch.tmp, scratch.home, scratch.cache]) mkdirSync(dir)
+    return scratch
+  } catch (err) {
+    // One that can't be made whole goes again, and with it the folder that holds the scratch folders, if none is left.
+    for (const made of [root, short]) if (made) rmSync(made, { recursive: true, force: true })
+    try {
+      rmdirSync(parent)
+    } catch {
+      // Another run's scratch is there.
+    }
+    throw err
+  }
 }
 
 /**
@@ -104,36 +132,91 @@ export async function removeFolder(dir: string): Promise<void> {
   }
 }
 
-/** A folder and every folder in it writable by its owner; links are not followed. */
+/** A folder and every folder in it writable by its owner; never through a link, which is left as it is. */
 async function makeWritable(dir: string): Promise<void> {
+  if (!(await lstat(dir)).isDirectory()) return
   await chmod(dir, 0o700)
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) await makeWritable(path.join(dir, entry.name))
   }
 }
 
-/** A folder by its real path, or null when there is none. */
-function realFolder(dir: string): string | null {
+/** macOS's data volume, where the person's and the system's own folders of "/" (/Users, /private) are, by other names. */
+const MACOS_DATA = "/System/Volumes/Data"
+
+/**
+ * A folder by its real path, as the system names it (macOS's in its own case), or null when there is none. On macOS, a
+ * folder named from its data volume goes by its name from "/" when that is the same folder: /System/Volumes/Data/Users/x
+ * is /Users/x. The data volume itself is no folder of "/", and keeps its name.
+ */
+export function realFolder(dir: string): string | null {
   try {
-    const real = realpathSync(dir)
-    return statSync(real).isDirectory() ? real : null
+    const real = realpathSync.native(dir)
+    if (!statSync(real).isDirectory()) return null
+    if (process.platform !== "darwin" || !real.startsWith(`${MACOS_DATA}/`)) return real
+    const named = real.slice(MACOS_DATA.length)
+    return sameFolder(real, named) ? named : real
   } catch {
     return null
   }
 }
 
+/** Whether two paths are the same folder, by its device and inode. */
+function sameFolder(a: string, b: string): boolean {
+  try {
+    const [one, other] = [statSync(a, { bigint: true }), statSync(b, { bigint: true })]
+    return one.dev === other.dev && one.ino === other.ino
+  } catch {
+    return false
+  }
+}
+
+/** A path as a run's places have it: a folder by its real path (realFolder), anything else as named. */
+const canonical = (place: string) => realFolder(place) ?? path.resolve(place)
+
+/** Every name a place has: on macOS, also its data volume's (/System/Volumes/Data/Users/x for /Users/x). */
+const namesOf = (place: string) => (process.platform === "darwin" ? [place, MACOS_DATA + place] : [place])
+
+/** macOS's own folder for each user, which holds their temporary files (`T`) beside their caches (`C`) and more. */
+const MACOS_USER_FOLDER = /^\/private\/var\/folders\/[^/]+\/[^/]+$/
+
 /**
- * The system's temporary folders, as they really are: macOS's /tmp is a link to /private/tmp, and a link closed itself
- * would close every path through it, even to a folder opened again inside (the run's short folder).
+ * The system's temporary folders, and the person's own runtime ones (macOS's folder of theirs that holds their
+ * temporary files, Linux's /dev/shm and XDG_RUNTIME_DIR), as they really are: macOS's /tmp is a link to /private/tmp,
+ * and a link closed itself would close every path through it, even to a folder opened again inside (the run's short
+ * folder).
  */
 export function systemTemps(): string[] {
-  const named = process.platform === "win32" ? [os.tmpdir()] : [os.tmpdir(), "/tmp", "/var/tmp"]
+  const own = realFolder(os.tmpdir())
+  const named: Partial<Record<NodeJS.Platform, (string | null | undefined)[]>> = {
+    darwin: [own && MACOS_USER_FOLDER.test(path.dirname(own)) ? path.dirname(own) : own, "/tmp", "/var/tmp"],
+    linux: [own, "/tmp", "/var/tmp", "/dev/shm", process.env.XDG_RUNTIME_DIR],
+    win32: [own],
+  }
   const out = new Set<string>()
-  for (const dir of named) {
-    const real = realFolder(dir)
+  for (const dir of named[process.platform] ?? [own, "/tmp", "/var/tmp"]) {
+    const real = dir ? realFolder(dir) : null
     if (real) out.add(real)
   }
   return [...out]
+}
+
+/**
+ * Why a run can't be given a folder, to work in or to read (`as`), or null: the same for its folder and for each the
+ * host adds. One that is, or holds, the person's home or one of the system's temporary folders would open them all to
+ * the run, and the filesystem's root holds them all; one that is, holds or is in the agent's own home (`agentHomes`)
+ * would open its settings and sign-in. Each place by every name it has.
+ */
+export function unfitFolder(folder: string, agentHomes: string[] = [], as: "work in" | "read" = "work in"): string | null {
+  const real = canonical(folder)
+  const shared = [canonical(os.homedir()), ...systemTemps(), canonical(os.tmpdir())].flatMap(namesOf)
+  const held = shared.find((place) => inside(real, place))
+  if (held) return `A run can't ${as} ${real}: it holds ${held}, which no run may reach`
+  for (const home of agentHomes.map(canonical).flatMap(namesOf)) {
+    if (inside(real, home)) return `A run can't ${as} ${real}: it holds ${home}, the agent's own home, which no run may reach`
+    if (inside(home, real)) return `A run can't ${as} ${real}: it is in ${home}, the agent's own home, which no run may reach`
+  }
+  return null
 }
 
 /** The folders on a PATH that are inside the home, by their real paths: never the home itself. */
@@ -146,16 +229,20 @@ export function homeTools(pathVariable: string, home: string): string[] {
   return [...out]
 }
 
-/** A run's places, as it starts: its folder and the scratch in it, what the host adds and hides. */
-export function placesFor(o: { folder: string; scratch: Places["scratch"]; readable?: string[]; hidden: string[] }): Places {
-  const home = realFolder(os.homedir()) ?? path.resolve(os.homedir())
+/**
+ * A run's places, as it starts: its folder and the scratch in it, the agent's own home, what the host adds and hides;
+ * each folder by its real path, as the agents' sandboxes see it.
+ */
+export function placesFor(o: { folder: string; scratch: Places["scratch"]; agentHomes: string[]; readable?: string[]; hidden: string[] }): Places {
+  const home = canonical(os.homedir())
   return {
-    folder: path.resolve(o.folder),
+    folder: canonical(o.folder),
     scratch: o.scratch,
     temps: systemTemps(),
     home,
+    agentHomes: o.agentHomes.map(canonical),
     tools: homeTools(process.env.PATH ?? "", home),
-    readable: (o.readable ?? []).map((p) => path.resolve(p)),
+    readable: (o.readable ?? []).map(canonical),
     hidden: o.hidden,
   }
 }

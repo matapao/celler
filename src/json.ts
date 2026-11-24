@@ -1,4 +1,5 @@
 import { fail } from "./errors.js"
+import { jsonDepth } from "./limits.js"
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
@@ -11,6 +12,8 @@ export function normalizeJson(value: unknown, seen = new Set<object>()): JsonVal
   }
   if (typeof value !== "object") fail("INVALID_ARGS", "Value is not valid JSON")
   if (seen.has(value)) fail("INVALID_ARGS", "Circular structure is not valid JSON")
+  // `seen` holds what this value is inside, so its size is how deep the value nests.
+  if (seen.size >= jsonDepth) fail("INVALID_ARGS", `JSON nests deeper than ${jsonDepth} levels`)
   seen.add(value)
   try {
     if (Array.isArray(value)) return value.map(item => normalizeJson(item, seen))

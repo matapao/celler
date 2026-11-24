@@ -5,10 +5,11 @@
 // - every command runs in the sandbox, and what would go beyond it Codex refuses itself, asking no one;
 // - commands reach no network at all: everything outside the computer goes through the host's tools (MCP);
 // - they write only in the run's folder (only at work) and its own scratch folder inside it, and never touch the
-//   folder's own settings for the agents celler runs;
+//   folder's own settings for the agents celler runs, nor a repository's hooks and git settings there, which Codex
+//   keeps read-only itself (checked on macOS with a real run);
 // - they read the computer, but never the person's home (where the host keeps its data) or the system's temporary
 //   folders, which other programs share (their temporary files are in the scratch): there, only the folder, PATH's
-//   folders and what the host adds;
+//   folders and what the host adds; nor Codex's own home (CODEX_HOME), its settings and sign-in, wherever it is;
 // - their environment is Codex's core variables and the run's own home and temporary folders;
 // - no web search, no image read from anywhere on the computer, no plugins, hooks or memories.
 
@@ -32,11 +33,14 @@ export default function codexOnMacos(p: Places, purpose: "work" | "read") {
           ":root": "read",
           [p.home]: "deny",
           ...each(p.temps, "deny"),
-          // In those, PATH's folders and what the host adds read; the run's scratch written, to read too.
+          // In those, PATH's folders and what the host adds read.
           ...each(p.tools, "read"),
           ...each(p.readable, "read"),
-          [p.scratch.root]: "write",
-          // The run's folder: written at work, else read.
+          // Its own home, its settings and sign-in, never, wherever it is.
+          ...each(p.agentHomes, "deny"),
+          // The run's folder: written at work, else read but for the run's scratch in it. At work the folder holds the
+          // scratch, which then has no entry of its own the run's commands could put a link in place of.
+          ...each(purpose === "work" ? [] : [p.scratch.root], "write"),
           ":workspace_roots": { ".": purpose === "work" ? "write" : "read", ...SETTINGS },
         },
         network: { enabled: false },

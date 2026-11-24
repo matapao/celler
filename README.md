@@ -26,7 +26,7 @@ await app.start({ owner, revision, entry: "review", workspace, input: "Summarize
 ## Concepts
 
 - **Cell**: a role with a launch `profile`, `context` and `exports`. Without a profile it only groups nodes.
-- **Tool**: an MCP definition bound to an `{ adapter }` (host code) or a `{ cell }` (a child run that lives as long as its caller's run). Its name is its node ID.
+- **Tool**: an MCP definition bound to an `{ adapter }` (host code) or a `{ cell }` (a child run that lives as long as its caller's run, and answers in text, so it declares no `outputSchema`). Its name is its node ID.
 - **Revision**: a published graph, checked for references, cycles and JSON Schemas (2020-12, or draft-07 by `$schema`).
 - **Grants**: a run sees what its cell reaches and `allowed` permits, never what an ancestor was denied, rechecked up the delegation chain on every call. Call `app.notifyToolsChanged()` after a policy change.
 - **Adapters**: one with `call` runs at once. One with `prepare` and `send` makes a packet, a person approves it via `app.human`, and `send` delivers exactly that packet. The host's map is read live: add adapters, then publish the tools they serve.
@@ -41,7 +41,7 @@ await app.start({ owner, revision, entry: "review", workspace, input: "Summarize
 - Publish `workspaceNodes` for logged file access with per-tool grants, or leave them out and let the broker mount the workspace for the harness's own file tools: faster, but not in the log.
 - Put anything that sends data to a third party behind `prepare` and `send`. A `call` adapter's arguments leave unreviewed.
 - Render approvals with `showApproval` from `celler/preview`. It marks every character a reviewer could not see.
-- After a crash, `unknown` deliveries wait for `human.reconcile(owner, id, "sent" | "failed")`. Resume a run with `app.reconnect`; `app.end` ends it and everything it delegated.
-- Limits and their defaults are in `src/limits.ts`. Override any by name in the options.
+- After a crash, `unknown` deliveries wait for `human.reconcile(owner, id, "sent" | "failed", result?)`: a sent one's result passes its tool's checks, as a delivery's own answer does. Resume a run with `app.reconnect`; `app.end` ends it and everything it delegated.
+- Limits and their defaults are in `src/limits.ts`. Override any of the app's, the broker's or a connector's by name in its options. The harness's, and how deep JSON may nest, are module constants.
 
 Changing the code? Read [AGENTS.md](AGENTS.md) first. `pnpm test` must pass.

@@ -1,12 +1,19 @@
 import { fail } from "./errors.js"
 
 /** The largest packet, payload or result held in memory at once. */
-export const INLINE_LIMIT = 16 * 1024 * 1024
+const INLINE_LIMIT = 16 * 1024 * 1024
 
 // Every tunable bound and its default, by component. Hosts override a bound by naming it in that component's options.
 export const appLimits = {
   /** Most tool-definition bytes put in front of the model at once. 0 always uses discover and invoke. */
   discoveryBytes: 4096,
+  /** What discover takes: a query's characters and the words it looks for, and how many refs at once. */
+  discoveryQueryChars: 256,
+  discoveryTerms: 16,
+  discoveryRefs: 20,
+  /** What discover gives: the results on a page, and the furthest a page starts. */
+  discoveryPageSize: 5,
+  discoveryOffset: 10_000,
   inlineLimit: INLINE_LIMIT,
   /** Delegation depth below a root run. 0 forbids delegation. */
   maxDepth: 16,
@@ -14,14 +21,29 @@ export const appLimits = {
   maxRuns: 16,
   /** Tool calls in flight at once in one run. */
   maxConcurrency: 32,
+  /** Tasks one MCP connection holds at once, finished or not. */
+  maxTasks: 64,
+  /** The longest a task is kept, whatever its client asks; under 2**31 ms, as timers take. */
+  taskTtlMs: 60 * 60_000,
   /** Pending approvals in one owner's inbox. */
   maxPendingApprovals: 32,
   /** Bytes of pending packets in one owner's inbox. */
   maxPendingBytes: 32 * 1024 * 1024,
-  /** Compiled revisions kept in memory. */
+  /** Compiled revisions, and runs with their grants, kept in memory. */
   graphCacheSize: 64,
+  runCacheSize: 256,
+  /** Compiled JSON Schemas kept in memory, shared by their text. */
+  schemaCacheSize: 4096,
+  /** The longest value the `url` format takes. */
+  urlChars: 2048,
+  /** How much of what is wrong with its arguments a call is told. */
+  argsErrorChars: 500,
+  /** The longest `celler/call-id` a client may give. */
+  callIdChars: 128,
   /** Progress heartbeat while a call waits for a person or a delegated run. 0 sends none. */
   progressIntervalMs: 15_000,
+  /** How long a statement waits for another connection's lock on the database. */
+  busyTimeoutMs: 5000,
 }
 export const brokerLimits = {
   inlineLimit: INLINE_LIMIT,
@@ -29,9 +51,17 @@ export const brokerLimits = {
   maxConcurrency: 16,
   /** Time between SIGTERM and SIGKILL when a broker outlives its request. */
   killTimeoutMs: 2000,
+  /** The longest path, and the longest text a search looks for, that a workspace tool takes. */
+  pathChars: 4096,
+  queryChars: 4096,
 }
 export const readLimits = { maxBytes: INLINE_LIMIT }
 export const postLimits = { timeoutMs: 30_000, maxResponseBytes: 1024 * 1024 }
+
+// Module constants: no options name them.
+
+/** How deep objects and arrays may nest in the JSON celler copies: a graph, a run's input, an approval's arguments. */
+export const jsonDepth = 256
 /** The coding agents' harnesses: how long a program is waited for, and how much of what it says is kept. */
 export const harnessLimits = {
   /** A program asked its version or whether it is signed in. */
@@ -50,6 +80,18 @@ export const harnessLimits = {
   commandChars: 160,
   searchChars: 80,
   helperChars: 200,
+  /**
+   * The largest request a run's MCP server reads: a call's arguments as large as celler takes inline (INLINE_LIMIT),
+   * and the JSON-RPC message around them, its tool's name and its _meta.
+   */
+  mcpRequestBytes: INLINE_LIMIT + 64 * 1024,
+  /**
+   * The longest an agent lets one call to a run's MCP servers take: Claude Code's per-server `timeout` (which also lifts
+   * its 5 minutes for a call it hears nothing from) and Codex's `tool_timeout_sec`, in seconds, in place of its own 300.
+   * Celler bounds no call's wait for the person while its run goes on, and the run's clock stands still meanwhile, so
+   * the agent's bound is the only one: Claude Code's own default (MCP_TOOL_TIMEOUT, 1e8 ms, about 28 hours), for both.
+   */
+  mcpCallMs: 100_000_000,
 }
 
 /**

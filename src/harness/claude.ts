@@ -4,8 +4,10 @@
 import {
   query,
   type CanUseTool,
+  type EffortLevel,
   type ElicitationRequest,
   type ElicitationResult,
+  type ModelInfo,
   type OnElicitation,
   type Options,
   type PermissionResult,
@@ -14,7 +16,7 @@ import {
   type SDKResultMessage,
 } from "@anthropic-ai/claude-agent-sdk"
 import { harnessLimits as L } from "../limits.js"
-import { attachmentLinks, forThisSystem, type Turn } from "./runtime.js"
+import { forThisSystem, promptOf, saysSignedOut, type Turn } from "./runtime.js"
 import claudeOnLinux from "./sandbox/claude.linux.js"
 import claudeOnMacos from "./sandbox/claude.macos.js"
 import claudeOnWindows from "./sandbox/claude.windows.js"
@@ -25,10 +27,10 @@ import { emptyUsage, errorText, isTier, type AgentAsk, type AgentFormField, type
 const CLAUDE_ON: Partial<Record<NodeJS.Platform, typeof claudeOnMacos>> = { darwin: claudeOnMacos, linux: claudeOnLinux, win32: claudeOnWindows }
 
 /** Its tools that write a file, and those that start a helper (a subagent). */
-const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"])
+const WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit"])
 const HELPER_TOOLS = new Set(["Task", "Agent"])
 /** Where a call's input names its file, and how a call reads by the first of the other keys its input has. */
-const FILE_KEYS = ["file_path", "notebook_path", "path"]
+const FILE_KEYS = ["file_path", "notebook_path"]
 const SUMMARIES: [string, (name: string, v: string) => string][] = [
   ["command", (n, v) => `${n}: ${v.slice(0, L.commandChars)}`],
   ["pattern", (n, v) => `${n} "${v.slice(0, L.searchChars)}"`],
@@ -36,20 +38,12 @@ const SUMMARIES: [string, (name: string, v: string) => string][] = [
   ["query", (n, v) => `${n} "${v.slice(0, L.searchChars)}"`],
 ]
 /** The efforts it takes, and the run's when it is one of them. */
-const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const
+const EFFORTS: EffortLevel[] = ["low", "medium", "high", "xhigh", "max"]
 const effortOf = (spec: RunSpec) => EFFORTS.find((effort) => effort === spec.effort)
-/** How a turn ended when the agent didn't end it itself. */
-const ENDINGS: Record<string, string> = {
-  error_max_turns: "Stopped at the turn or budget limit",
-  error_max_budget_usd: "Stopped at the turn or budget limit",
-  error_max_structured_output_retries: "Stopped after too many tries at its answer's form",
-}
 /** Its account can't run: no run works until the person signs in again, or sees to the account. */
 const SIGNED_OUT = new Set(["authentication_failed", "oauth_org_not_allowed", "account_on_hold", "verification_required", "billing_error", "cloud_credential_error"])
-/** An error that says the agent itself isn't signed in, not one its MCP servers passed on. */
+/** What it says when it isn't signed in itself. */
 const SIGN_IN_RE = /api key|\/login|authenticat|oauth|not logged in|credit balance/i
-const MCP_LINE_RE = /\bmcp[\s_:.-]|mcp server/i
-const isSignInProblem = (msg: string) => msg.split("\n").some((line) => !MCP_LINE_RE.test(line) && SIGN_IN_RE.test(line))
 /** What the person may answer to a call it asks about: once, or not. "Always" would be written into the folder's settings. */
 const OPTIONS: AgentAsk["options"] = [
   { optionId: "allow", name: "Allow", kind: "allow_once" },
@@ -100,13 +94,14 @@ function formOf(req: ElicitationRequest): AgentAsk["form"] | null {
   return { message: req.message, fields }
 }
 
-/** Its questions to the person (AskUserQuestion's input), each with the choices it offers. */
-function questionsIn(input: unknown): { question: string; header: string; multiSelect: boolean; options: string[] }[] {
+/** Its questions to the person (AskUserQuestion's input) as a form's fields, each by its question, with its choices. */
+function questionFields(input: unknown): AgentFormField[] {
   const questions = isRecord(input) && Array.isArray(input.questions) ? input.questions : []
-  return questions.flatMap((q) => {
+  return questions.flatMap((q): AgentFormField[] => {
     if (!isRecord(q) || typeof q.question !== "string" || !Array.isArray(q.options)) return []
-    const options = q.options.flatMap((o) => (isRecord(o) && typeof o.label === "string" ? [o.label] : []))
-    return [{ question: q.question, header: typeof q.header === "string" ? q.header : "", multiSelect: q.multiSelect === true, options }]
+    const choices = q.options.flatMap((o) => (isRecord(o) && typeof o.label === "string" ? [{ value: o.label, label: o.label }] : []))
+    const title = typeof q.header === "string" && q.header ? q.header : q.question
+    return [{ name: q.question, title, type: q.multiSelect === true ? "array" : "string", required: true, choices }]
   })
 }
 
@@ -118,10 +113,11 @@ function optionsFor(t: Turn, model: string): Options {
     cwd: spec.cwd,
     pathToClaudeCodeExecutable: t.program,
     // Started as the runtime starts an agent's processes: in a process group of its own, which its end ends.
-    spawnClaudeCodeProcess: (s) => t.spawn(s.command, s.args, { ...(s.cwd ? { cwd: s.cwd } : {}), env: s.env, signal: s.signal }),
+    spawnClaudeCodeProcess: (s) => t.spawn(s.command, s.args, s),
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
-    ...(spec.systemPrompt ? { systemPrompt: { type: "preset" as const, preset: "claude_code" as const, append: spec.systemPrompt } } : {}),
+    // Its own system prompt, and the cells' texts after it: without it, it would start with an empty one.
+    systemPrompt: { type: "preset", preset: "claude_code", ...(spec.systemPrompt ? { append: spec.systemPrompt } : {}) },
     // No settings files: a folder's own would run hooks and helpers outside what the host set. Only the host's connectors.
     settingSources: [],
     strictMcpConfig: true,
@@ -132,7 +128,7 @@ function optionsFor(t: Turn, model: string): Options {
   if (spec.purpose === "inference") {
     return { ...base, env: t.env, tools: [], settings: { disableClaudeAiConnectors: true, autoMemoryEnabled: false }, permissionMode: "default", persistSession: false }
   }
-  const own = forThisSystem(CLAUDE_ON, "Claude Code")(t.places, spec.purpose === "work" ? "work" : "read")
+  const own = forThisSystem(CLAUDE_ON, "Claude Code")(t.places, spec.purpose)
   // The host's servers gate each call themselves: Claude Code doesn't ask about their tools again.
   const allow = [...own.settings.permissions.allow, ...spec.mcpServers.map((s) => `mcp__${s.name}`)]
   return {
@@ -143,8 +139,8 @@ function optionsFor(t: Turn, model: string): Options {
     settings: { ...own.settings, permissions: { ...own.settings.permissions, allow } },
     permissionMode: own.permissionMode,
     // The host's servers, sent in its first request rather than on its command line, where anyone on the computer could
-    // read their values.
-    mcpServers: Object.fromEntries(spec.mcpServers.map((s) => [s.name, { type: s.transport === "sse" ? ("sse" as const) : ("http" as const), url: s.url, headers: s.headers }])),
+    // read their values; a call to them may wait for the person as long as celler lets it (limits.ts).
+    mcpServers: Object.fromEntries(spec.mcpServers.map((s) => [s.name, { type: s.transport === "sse" ? ("sse" as const) : ("http" as const), url: s.url, headers: s.headers, timeout: L.mcpCallMs }])),
     mcpServersDelivery: "initialize",
   }
 }
@@ -155,8 +151,7 @@ export async function runClaude(t: Turn, o: { models: Record<ModelTier, string>;
   const model = isTier(spec.model) ? o.models[spec.model] : spec.model
   const report = new Report(t)
   const abort = new AbortController()
-  const prompt = [spec.prompt, attachmentLinks(spec.attachments)].filter(Boolean).join("\n\n")
-  const q = query({ prompt, options: { ...optionsFor(t, model), canUseTool: report.permission, onElicitation: report.elicit, abortController: abort } })
+  const q = query({ prompt: promptOf(spec), options: { ...optionsFor(t, model), canUseTool: report.permission, onElicitation: report.elicit, abortController: abort } })
   // Asked to end its turn, its session kept to resume; stopped if it hasn't ended in its grace.
   const stop = () => {
     q.interrupt().catch(() => undefined)
@@ -173,12 +168,13 @@ export async function runClaude(t: Turn, o: { models: Record<ModelTier, string>;
     t.signal.removeEventListener("abort", stop)
     q.close()
   }
-  return report.ending(spec, o.signedOut, t.stderr())
+  return report.ending(o.signedOut)
 }
 
 /** One run as Claude Code reports it: its reply, its tool calls, what it asks, its cost and model, what was refused. */
 class Report {
-  private calls = new Map<string, { name: string; input: unknown }>()
+  /** Its calls, by their ids: each tool's name, and the file it writes, for one that writes. */
+  private calls = new Map<string, { name: string; file?: string }>()
   /** The message it is writing, by the id of the message it streams in. */
   private writing = ""
   private writingIn: string | null = null
@@ -196,7 +192,7 @@ class Report {
 
   constructor(private t: Turn) {}
 
-  named(models: { resolvedModel?: string; value: string; displayName: string }[]): void {
+  named(models: ModelInfo[]): void {
     for (const m of models) this.names.set(m.resolvedModel ?? m.value, m.displayName)
   }
 
@@ -270,7 +266,7 @@ class Report {
   /** A call once it is made, with what it is to do; a helper's with what it is for. */
   private tool(id: string, name: string, input: unknown, parent: string | null): void {
     if (this.calls.has(id)) return
-    this.calls.set(id, { name, input })
+    this.calls.set(id, { name, file: WRITE_TOOLS.has(name) ? fileOf(input) : undefined })
     const helper = HELPER_TOOLS.has(name) && isRecord(input) ? String(input.description ?? input.prompt ?? "").trim().slice(0, L.helperChars) : ""
     this.t.progress({ type: "tool", tool: name, summary: summarize(name, input), call: id, ...(parent ? { parent } : {}), ...(helper ? { helper } : {}) })
   }
@@ -279,7 +275,7 @@ class Report {
   private finished(id: string, ok: boolean): void {
     const call = this.calls.get(id)
     if (!call) return
-    const file = WRITE_TOOLS.has(call.name) ? fileOf(call.input) : undefined
+    const { file } = call
     if (file && ok) this.t.progress({ type: "file", file })
     if (file && !ok && outside(file, this.t.spec.cwd)) this.refused.add(file)
     if (HELPER_TOOLS.has(call.name)) this.t.progress({ type: "helper-done", call: id, ok })
@@ -299,21 +295,14 @@ class Report {
 
   /** Its questions to the person (AskUserQuestion) as a form, each answered with one of its choices, or several. */
   private async question(input: Record<string, unknown>, call: string, signal: AbortSignal): Promise<PermissionResult> {
-    const questions = questionsIn(input)
+    const fields = questionFields(input)
     const ask = this.t.ask
-    if (!ask || !questions.length) return { behavior: "deny", message: UNANSWERED }
-    const fields: AgentFormField[] = questions.map((q) => ({
-      name: q.question,
-      title: q.header || q.question,
-      type: q.multiSelect ? "array" : "string",
-      required: true,
-      choices: q.options.map((label) => ({ value: label, label })),
-    }))
-    const form = { message: questions.map((q) => q.question).join("\n"), fields }
-    const answer = await ask({ call, tool: "AskUserQuestion", title: questions[0].question, input, options: [], form }, signal)
+    if (!ask || !fields.length) return { behavior: "deny", message: UNANSWERED }
+    const form = { message: fields.map((f) => f.name).join("\n"), fields }
+    const answer = await ask({ call, tool: "AskUserQuestion", title: fields[0].name, input, options: [], form }, signal)
     if (!answer || !("accept" in answer) || !answer.accept) return { behavior: "deny", message: answer ? DECLINED : UNANSWERED }
     const said = (v: unknown) => (Array.isArray(v) ? v.map(String).join(", ") : String(v ?? ""))
-    const answers = Object.fromEntries(questions.map((q) => [q.question, said(answer.content?.[q.question])]))
+    const answers = Object.fromEntries(fields.map((f) => [f.name, said(answer.content?.[f.name])]))
     return { behavior: "allow", updatedInput: { ...input, answers } }
   }
 
@@ -337,7 +326,8 @@ class Report {
   }
 
   /** How the run ended: its reply, or why it didn't end as the agent meant; what it spent either way. */
-  ending(spec: RunSpec, signedOut: string, stderr: string): RunResult {
+  ending(signedOut: string): RunResult {
+    const { spec } = this.t
     const r = this.ended
     const permissionDenials = (r?.permission_denials ?? []).map((d) => {
       const file = WRITE_TOOLS.has(d.tool_name) ? fileOf(d.tool_input) : undefined
@@ -357,13 +347,13 @@ class Report {
     const spent = (r?.total_cost_usd ?? 0) > 0
     if (this.signedOut && !spent) return failed(signedOut, true)
     if (!r) {
-      const said = [stderr.trim(), this.error ?? ""].filter(Boolean).join("\n")
+      const said = [this.t.stderr().trim(), this.error ?? ""].filter(Boolean).join("\n")
       if (spec.resume && /no conversation found/i.test(said)) return failed(`Session ${spec.sessionId} could not be resumed: not found`)
-      if (isSignInProblem(said)) return failed(signedOut, true)
+      if (saysSignedOut(said, SIGN_IN_RE)) return failed(signedOut, true)
       return { ...failed(""), error: (said || "Claude Code ended before its turn did").slice(-L.errorChars) }
     }
-    if (r.subtype !== "success") return failed(ENDINGS[r.subtype] ?? (r.errors.join("\n") || r.subtype))
-    if (r.is_error) return isSignInProblem(r.result) && !spent ? failed(signedOut, true) : failed(r.result || "Claude Code ended its turn with an error")
+    if (r.subtype !== "success") return failed(r.errors.join("\n") || r.subtype)
+    if (r.is_error) return saysSignedOut(r.result, SIGN_IN_RE) && !spent ? failed(signedOut, true) : failed(r.result || "Claude Code ended its turn with an error")
     if (r.stop_reason === "refusal") return failed("The model declined the request")
     return { ...result, ok: true }
   }

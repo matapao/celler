@@ -6,11 +6,11 @@ import { normalizeJson } from "./json.js"
 import { postLimits, readLimits, withLimits } from "./limits.js"
 import type { Run, Write } from "./store.js"
 
-async function readBoundedText(response: Response, maxBytes: number): Promise<string> {
+/** The body as text, or undefined once it is over `maxBytes`: the rest is never read. */
+async function readBoundedText(response: Response, maxBytes: number): Promise<string | undefined> {
   if (!response.body) {
     const text = await response.text()
-    if (Buffer.byteLength(text) > maxBytes) fail("LIMIT_EXCEEDED", "Response body exceeds byte limit")
-    return text
+    return Buffer.byteLength(text) > maxBytes ? undefined : text
   }
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
@@ -22,7 +22,7 @@ async function readBoundedText(response: Response, maxBytes: number): Promise<st
       bytes += value.byteLength
       if (bytes > maxBytes) {
         await reader.cancel()
-        fail("LIMIT_EXCEEDED", "Response body exceeds byte limit")
+        return undefined
       }
       chunks.push(value)
     }
@@ -78,7 +78,8 @@ export function postJson(
     async send(run, write, key, signal) {
       verify(run, write)
       const secret = await token()
-      if (!secret || /[\r\n]/.test(secret)) fail("DELIVERY_FAILED", "Invalid authorization token")
+      // Printable ASCII only, which every header carries as it is: nothing in a token can become a header of its own.
+      if (typeof secret !== "string" || !/^[\x21-\x7e]+$/.test(secret)) fail("DELIVERY_FAILED", "Invalid authorization token")
       const timeout = AbortSignal.timeout(timeoutMs)
       const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
       const response = await fetch(endpoint, {
@@ -88,8 +89,16 @@ export function postJson(
         headers: { Authorization: "Bearer " + secret, "Content-Type": "application/json", "Idempotency-Key": key },
         body: JSON.stringify(write.content),
       })
-      if (!response.ok) fail("DELIVERY_FAILED", "Delivery outcome needs checking: " + response.status)
-      return { content: [{ type: "text", text: await readBoundedText(response, maxResponseBytes) }] }
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => {}) // unread, it would hold its connection
+        fail("DELIVERY_FAILED", "Delivery outcome needs checking: " + response.status)
+      }
+      // It arrived: an answer too large to keep fails the call, never the delivery, which is recorded as sent.
+      const body = await readBoundedText(response, maxResponseBytes)
+      if (body === undefined) {
+        return { isError: true, content: [{ type: "text", text: "Delivered, but its response exceeds the byte limit" }] }
+      }
+      return { content: [{ type: "text", text: body }] }
     },
   }
 }

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { setTimeout as delay } from "node:timers/promises"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { ErrorCode, McpError, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js"
 import { createApp } from "celler"
 import { cell, discover, memoryDatabase, object, refused, request, text, tool, until, withClient } from "./support.mjs"
@@ -440,4 +442,236 @@ test("draft-07 schemas publish, the url format stays linear, and a call asks the
   const tools = groups.flatMap(group => group.exports.map(id => tool(id, { adapter: "ok" })))
   const revision = app.publish([cell("root", ["legacy", ...groups.map(group => group.id)]), legacy, ...groups, ...tools])
   assert.deepEqual(await app.start(request(revision)), text("done"))
+})
+
+test("a call its run's end cuts off hears that the run ended, never what its adapter threw as it stopped", async t => {
+  const secret = "postgres://svc:hunter2@10.0.0.7/prod"
+  let started = 0
+  // As a database driver does: aborted, it rejects with its own words.
+  const adapters = new Map([["db", { call: (_run, _args, signal) => new Promise((_resolve, reject) => {
+    started++
+    signal.addEventListener("abort", () => reject(Error(secret)), { once: true })
+  }) }]])
+  const graph = [cell("root", ["look"]), tool("look", { adapter: "db" })]
+  const heardEnded = heard => {
+    assert.equal(heard.isError, true, JSON.stringify(heard))
+    assert.equal(heard.content[0].text, "Run has ended")
+    assert.doesNotMatch(JSON.stringify(heard), /hunter2/)
+  }
+
+  // Ended by the host while the call waits.
+  let app, heard
+  app = createApp({ database: memoryDatabase(t), adapters, platform: {
+    allowed: () => true,
+    launch: (spec, connect) => withClient(connect, async client => {
+      const call = client.callTool({ name: "look", arguments: {} })
+      await until(() => started === 1)
+      app.end("alice", spec.id)
+      heard = await call
+      return text("ended")
+    }),
+  } })
+  await assert.rejects(app.start(request(app.publish(graph))))
+  heardEnded(heard)
+
+  // A run that finishes with the call still going, its connection kept a moment, as harnessPlatform keeps it.
+  let late
+  const finished = createApp({ database: memoryDatabase(t), adapters, platform: {
+    allowed: () => true,
+    launch: async (_spec, connect) => {
+      const [local, remote] = InMemoryTransport.createLinkedPair()
+      await connect(remote)
+      const client = new Client({ name: "test-harness", version: "1" })
+      await client.connect(local)
+      late = client.callTool({ name: "look", arguments: {} }).finally(() => client.close())
+      await until(() => started === 2)
+      return text("finished")
+    },
+  } })
+  assert.deepEqual(await finished.start(request(finished.publish(graph))), text("finished"))
+  heardEnded(await late)
+
+  // The database failing as a call begins, before any of its own work.
+  const database = memoryDatabase(t)
+  const broken = createApp({ database, adapters: new Map([["ok", { call: async () => text("ok") }]]), platform: {
+    allowed: () => true,
+    launch: (_spec, connect) => withClient(connect, async client => {
+      await client.listTools()
+      database.exec("ALTER TABLE runs RENAME TO runs_gone")
+      const heard = await client.callTool({ name: "look", arguments: {} }).then(result => JSON.stringify(result), error => error.message)
+      database.exec("ALTER TABLE runs_gone RENAME TO runs")
+      assert.match(heard, /Tool execution failed/)
+      assert.doesNotMatch(heard, /no such table|runs/)
+      return text("done")
+    }),
+  } })
+  assert.deepEqual(await broken.start(request(broken.publish([cell("root", ["look"]), tool("look", { adapter: "ok" })]))), text("done"))
+})
+
+test("a run's grants stop at a denied grouping cell, and a child gets nothing its caller was denied or lost before it delegated", async t => {
+  const database = memoryDatabase(t)
+  const called = []
+  let revoked = false
+  const app = createApp({ database, discoveryBytes: 0,
+    adapters: new Map([["ok", { call: async run => { called.push(run.entry); return text("ok") } }]]),
+    platform: {
+      // The person turned off the whole group; later, "shared" for the root's own run alone.
+      allowed: (run, id) => id !== "grp" && !(revoked && id === "shared" && run.parent === null),
+      launch: (spec, connect) => withClient(connect, async client => {
+        const invoke = name => client.callTool({ name: "invoke", arguments: { name } })
+        if (spec.entry === "root") {
+          await refused(invoke("grouped"), /outside this run/)
+          assert.deepEqual(await invoke("shared"), text("ok"))
+          revoked = true
+          await refused(invoke("shared"), /outside this run/)
+          return invoke("helper")
+        }
+        // The child exports both itself, and policy alone would let it use them.
+        await refused(invoke("grouped"), /outside this run/)
+        await refused(invoke("shared"), /outside this run/)
+        return text("child done")
+      }),
+    } })
+  const revision = app.publish([
+    cell("root", ["grp", "shared", "helper"]), { kind: "cell", id: "grp", title: "Group", exports: ["grouped"] },
+    tool("grouped", { adapter: "ok" }), tool("shared", { adapter: "ok" }),
+    tool("helper", { cell: "child" }), cell("child", ["grouped", "shared"]),
+  ])
+  assert.deepEqual(await app.start(request(revision)), text("child done"))
+  const grants = entry => JSON.parse(database.prepare("SELECT grants FROM runs WHERE json_extract(body, '$.entry')=?").get(entry).grants)
+  assert.deepEqual(grants("root"), ["root", "shared", "helper"])
+  assert.deepEqual(grants("child"), ["child"])
+  assert.deepEqual(called, ["root"])
+})
+
+test("a delegation's call key reused with other arguments while its child runs is refused, not a second child", async t => {
+  const children = []
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const app = createApp({ database: memoryDatabase(t), adapters: new Map(), platform: {
+    allowed: () => true,
+    launch: (spec, connect) => withClient(connect, async client => {
+      if (spec.entry === "worker") {
+        children.push(spec.input.task)
+        await gate
+        return text("did " + spec.input.task)
+      }
+      const work = task => client.callTool({ name: "work", arguments: { task }, _meta: { "celler/call-id": "same-key" } })
+      const first = work("one")
+      await until(() => children.length === 1)
+      setTimeout(release, 100) // a second child, were there one, would finish too
+      await refused(work("two"), /different arguments/)
+      assert.deepEqual(await first, text("did one"))
+      return text("root done")
+    }),
+  } })
+  const revision = app.publish([cell("root", ["work"]),
+    tool("work", { cell: "worker" }, { inputSchema: object({ task: { type: "string" } }) }), cell("worker", [])])
+  assert.deepEqual(await app.start(request(revision)), text("root done"))
+  assert.deepEqual(children, ["one"])
+})
+
+test("a connection that fails to start is forgotten: a change to the tools isn't sent to it", async t => {
+  let runId, finish
+  const app = createApp({ database: memoryDatabase(t), adapters: new Map(), platform: {
+    allowed: () => true,
+    launch: async spec => {
+      runId = spec.id
+      await new Promise(resolve => { finish = resolve })
+      return text("done")
+    },
+  } })
+  const running = app.start(request(app.publish([cell("root", [])])))
+  await until(() => runId)
+  const sent = []
+  const broken = { start: async () => { throw Error("transport failed to start") }, send: async message => { sent.push(message) }, close: async () => {} }
+  await assert.rejects(app.reconnect("alice", runId, broken), /failed to start/)
+  await app.notifyToolsChanged(runId)
+  await app.notifyToolsChanged()
+  assert.deepEqual(sent, [])
+  finish()
+  assert.deepEqual(await running, text("done"))
+})
+
+test("a graph that doesn't parse, or a tool bound to a cell that declares its output, is refused in celler's words", t => {
+  const app = createApp({ database: memoryDatabase(t), adapters: new Map(), platform: {} })
+  assert.throws(() => app.publish([{ kind: "cell", id: "a" }]),
+    error => error.name === "CellerError" && error.code === "INVALID_CONFIG" && /title/.test(error.message))
+  // A delegated run answers in text, so no structured output could ever pass.
+  assert.throws(() => app.publish([cell("a", ["go"]), tool("go", { cell: "b" }, { outputSchema: object({ id: { type: "string" } }) }), cell("b", [])]),
+    error => error.code === "INVALID_CONFIG" && /outputSchema/.test(error.message))
+})
+
+test("discover looks inside cells only: a tool named as within is the model's mistake to fix", async t => {
+  const app = createApp({ database: memoryDatabase(t), adapters: new Map([["ok", { call: async () => text("ok") }]]), platform: {
+    allowed: () => true,
+    launch: (_spec, connect) => withClient(connect, async client => {
+      await refused(client.callTool({ name: "discover", arguments: { within: "t" } }), /Expected a cell in within: t/)
+      return text("done")
+    }),
+  } })
+  assert.deepEqual(await app.start(request(app.publish([cell("root", ["t"]), tool("t", { adapter: "ok" })]))), text("done"))
+})
+
+test("a result or a start input over the inline limit is refused, and JSON nested past its bound is invalid, never a stack overflow", async t => {
+  const big = "x".repeat(10_000)
+  const app = createApp({ database: memoryDatabase(t), inlineLimit: 1024, adapters: new Map([["big", { call: async () => text(big) }]]), platform: {
+    allowed: () => true,
+    launch: (_spec, connect) => withClient(connect, async client => {
+      await refused(client.callTool({ name: "look", arguments: {} }), /inline limit/)
+      return text("done")
+    }),
+  } })
+  const revision = app.publish([cell("root", ["look"]), tool("look", { adapter: "big" })])
+  assert.deepEqual(await app.start(request(revision)), text("done"))
+  await assert.rejects(app.start({ ...request(revision), input: big }), { name: "CellerError", code: "LIMIT_EXCEEDED" })
+  let deep = {}
+  for (let i = 0; i < 20_000; i++) deep = { a: deep }
+  await assert.rejects(app.start({ ...request(revision), input: deep }), { name: "CellerError", code: "INVALID_ARGS" })
+})
+
+test("a call asks the policy about each node on its chain once, where the chain splits and joins again too", async t => {
+  let denying = false
+  const asked = []
+  const app = createApp({ database: memoryDatabase(t), adapters: new Map([["ok", { call: async () => text("ok") }]]), platform: {
+    allowed: (_run, id) => {
+      if (denying) asked.push(id)
+      return !(denying && id === "d")
+    },
+    launch: (_spec, connect) => withClient(connect, async client => {
+      await client.listTools()
+      denying = true
+      await refused(client.callTool({ name: "t", arguments: {} }), /outside this run/)
+      return text("done")
+    }, true),
+  } })
+  const group = (id, exports) => ({ kind: "cell", id, title: id, exports })
+  const revision = app.publish([cell("root", ["d"]), group("d", ["a", "b", "c"]),
+    group("a", ["t"]), group("b", ["t"]), group("c", ["t"]), tool("t", { adapter: "ok" })])
+  assert.deepEqual(await app.start(request(revision)), text("done"))
+  assert.deepEqual(asked, ["t", "a", "d", "b", "c"])
+})
+
+test("the app's limits are the host's to set by name, the discover tool's own bounds and the database's wait too", async t => {
+  const database = memoryDatabase(t)
+  const graph = [cell("root", ["t1", "t2", "t3"]), ...["t1", "t2", "t3"].map(id => tool(id, { adapter: "ok" }, { inputSchema: object({ n: { type: "number" } }) }))]
+  const app = createApp({
+    database, discoveryBytes: 0, discoveryPageSize: 2, discoveryQueryChars: 8, callIdChars: 4, argsErrorChars: 12, busyTimeoutMs: 250,
+    adapters: new Map([["ok", { call: async () => text("ok") }]]),
+    platform: {
+      allowed: () => true,
+      launch: (_spec, connect) => withClient(connect, async client => {
+        const page = await discover(client, {})
+        assert.deepEqual([page.items.length, page.next], [2, 2])
+        await assert.rejects(discover(client, { query: "x".repeat(9) }), /discover arguments/)
+        await assert.rejects(client.callTool({ name: "invoke", arguments: { name: "t1" }, _meta: { "celler/call-id": "12345" } }), /call-id/)
+        const heard = await refused(client.callTool({ name: "invoke", arguments: { name: "t1", arguments: { n: "x" } } }), /^Invalid arguments for t1: /)
+        assert.equal(heard.content[0].text.length, "Invalid arguments for t1: ".length + 12)
+        return text("done")
+      }),
+    },
+  })
+  assert.deepEqual(await app.start(request(app.publish(graph))), text("done"))
+  assert.equal(database.prepare("PRAGMA busy_timeout").get().timeout, 250)
+  assert.throws(() => createApp({ database, platform: {}, adapters: new Map(), maxTasks: 0 }), /Invalid maxTasks/)
 })
