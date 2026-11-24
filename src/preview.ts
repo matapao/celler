@@ -1,4 +1,6 @@
-import type { ApprovalState, RunStatus, Write } from './store.js';
+import type { Hashed } from './json.js';
+import type { ApprovalState, RunStatus } from './store.js';
+import type { Write } from './tables.js';
 
 // What a reviewer could not see: controls, format characters (bidi, zero-width, tag), private-use, unassigned and
 // surrogate code points, separators, what Unicode says shows nothing at all (variation selectors, which can carry a
@@ -111,12 +113,22 @@ export function showWrite(element: HTMLElement, write: Write) {
   if (createdUrls.length) views.set(element, { urls: createdUrls, seen: element.isConnected });
 }
 
+/** What never went, as celler keeps it: its packet's hash alone. */
+function showHash(element: HTMLElement, kept: Hashed) {
+  revokeUrls(element);
+  const line = document.createElement('p');
+  line.textContent = `Not kept, as it never went: only its hash, sha256 ${reveal(kept.sha256).shown}`;
+  element.replaceChildren(line);
+}
+
+/** An approval as `human.review` gives it: its packet, or once it never went, its hash. */
 export function showApproval(
   element: HTMLElement,
-  item: { id: string; state: ApprovalState; tool?: string; runStatus?: RunStatus; write: Write },
+  item: { id: string; state: ApprovalState; tool?: string; runStatus?: RunStatus; write: Write | Hashed },
   decide: (id: string, decision: 'approve' | 'decline') => Promise<void>,
 ) {
-  showWrite(element, item.write);
+  if ('sha256' in item.write) showHash(element, item.write);
+  else showWrite(element, item.write);
   const status = document.createElement('p');
   const parts = [item.tool ? `tool: ${reveal(item.tool).shown}` : '', `state: ${item.state}`];
   if (item.runStatus && item.runStatus !== 'running') parts.push(`run: ${item.runStatus}`);

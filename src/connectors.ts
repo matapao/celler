@@ -4,7 +4,8 @@ import type { Adapter } from './app.js';
 import { fail } from './errors.js';
 import { normalizeJson } from './json.js';
 import { postLimits, readLimits, withLimits } from './limits.js';
-import type { Run, Write } from './store.js';
+import type { Run } from './store.js';
+import type { Write } from './tables.js';
 
 /** The body as text, or undefined once it is over `maxBytes`: the rest is never read. */
 async function readBoundedText(response: Response, maxBytes: number): Promise<string | undefined> {

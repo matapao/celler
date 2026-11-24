@@ -57,3 +57,10 @@ export function canonicalJson(value: unknown): string {
 export function hash(value: unknown): string {
   return createHash('sha256').update(canonicalJson(value)).digest('hex');
 }
+
+/** What celler keeps of a value it doesn't keep: its hash alone. */
+export type Hashed = { sha256: string };
+
+export function hashed(value: unknown): Hashed {
+  return { sha256: hash(value) };
+}

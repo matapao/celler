@@ -8,7 +8,8 @@ import { fail, parseWith } from './errors.js';
 import { appLimits, withLimits } from './limits.js';
 import { createRuns } from './runs.js';
 import { createServer } from './server.js';
-import { openStore, type Run, type Write } from './store.js';
+import { openStore, type Run } from './store.js';
+import type { Write } from './tables.js';
 
 type Args = Record<string, unknown>;
 
@@ -112,7 +113,7 @@ export function createApp(options: AppOptions) {
       if (run.owner !== owner) fail('NOT_FOUND', 'Unknown run');
       const tree = [run.id];
       for (let i = 0; i < tree.length; i++) tree.push(...store.children(tree[i]));
-      for (const id of tree) store.finishRun(id, 'cancelled', { status: 'cancelled', by: 'host' });
+      for (const id of tree) store.finishRun(id, { status: 'cancelled', by: 'host' });
       for (const id of tree) runs.stop(id);
     },
     /** What a run may reach now: the node ids its grants, the live policy and its whole delegation chain allow. */

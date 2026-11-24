@@ -136,11 +136,15 @@ test('the same call made again once its approval is settled is made again, and a
     ),
   ]);
   assert.deepEqual(await app.start(request(revision)), text('done'));
-  // Its run ended, the same call collects what the last one it staged came to, and stages nothing more.
+  // Its run ended, the same call collects what the last one it staged came to, and stages nothing more: here, that it
+  // was delivered, as its answer was heard while the run went on and is kept no longer.
   await withClient(
     (channel) => app.reconnect('alice', runId, channel),
     async (client) => {
-      assert.deepEqual(await client.callTool({ name: 'send', arguments: { message: 'invoice 7' } }), text('sent'));
+      await refused(
+        client.callTool({ name: 'send', arguments: { message: 'invoice 7' } }),
+        /^Delivered; an earlier call collected its answer$/,
+      );
     },
   );
   assert.deepEqual([sent.length, app.human.inbox('alice').filter((item) => item.state === 'pending')], [2, []]);

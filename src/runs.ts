@@ -4,7 +4,7 @@ import { CallToolResultSchema, type CallToolResult } from '@modelcontextprotocol
 import type { Platform, Start } from './app.js';
 import { compileGraph, type Binding, type Graph, type Schemas } from './catalog.js';
 import { CellerError, fail } from './errors.js';
-import { hash, normalizeJson } from './json.js';
+import { hash, hashed, normalizeJson } from './json.js';
 import type { appLimits } from './limits.js';
 import { freezeRun, raceAbort, type Run, type Store } from './store.js';
 
@@ -217,12 +217,12 @@ export function createRuns(
       launchSignal.throwIfAborted();
       const parsed = CallToolResultSchema.safeParse(raw);
       if (!parsed.success) fail('INVALID_OUTPUT', 'Invalid run result from the platform');
-      const status = parsed.data.isError ? 'failed' : 'ok';
-      store.finishRun(run.id, status, { status, output: parsed.data });
+      // Its `ended` event keeps its output's hash alone: the output itself goes to whoever started it, a delegated
+      // run's to its caller, through the promise this returns.
+      store.finishRun(run.id, { status: parsed.data.isError ? 'failed' : 'ok', output: hashed(parsed.data) });
       return parsed.data;
     } catch (error) {
-      const status = launchSignal.aborted ? 'cancelled' : 'failed';
-      store.finishRun(run.id, status, { status });
+      store.finishRun(run.id, { status: launchSignal.aborted ? 'cancelled' : 'failed' });
       throw error;
     } finally {
       stop(run.id);

@@ -228,3 +228,13 @@ test("a file's name of any length is made plain at once, and an attachment of ma
       base64,
     );
 });
+
+test('an approval that never went shows its hash alone, as celler keeps it, and nothing to decide', (t) => {
+  const { root } = withDom(t);
+  const sha256 = 'ab'.repeat(32);
+  showApproval(root, { id: 'a3', state: 'declined', tool: 'send', runStatus: 'ok', write: { sha256 } }, async () => {});
+  assert.deepEqual(
+    root.children.map((child) => child.textContent),
+    [`Not kept, as it never went: only its hash, sha256 ${sha256}`, 'tool: send | state: declined | run: ok'],
+  );
+});

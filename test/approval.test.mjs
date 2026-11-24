@@ -62,7 +62,8 @@ test('approval binds destination and bytes, survives a reconnect, and delivers o
   await withClient(
     (channel) => app.reconnect('alice', runId, channel),
     async (client) => {
-      assert.deepEqual(await use(client, 'logical-call'), text('delivered'));
+      // Its answer was heard while the run went on, so it is kept no longer: the same call hears it was delivered.
+      await refused(use(client, 'logical-call'), /^Delivered; an earlier call collected its answer$/);
       await refused(use(client, 'new-call'), /Run has ended/);
     },
   );
