@@ -12,10 +12,11 @@ import { oneCell, fakeClaude, host, inFolder, spec } from './support-harness.mjs
 
 test("a run's clock stands still while the person is asked, and a file in its scratch isn't one it changed", () =>
   inFolder(async (dir) => {
-    // Asked for longer than the run may take: the time the person takes isn't the run's.
-    const slowly = async () => (await delay(1_500), { option: 'allow' });
+    // Asked for longer than the run may take: the time the person takes isn't the run's. The run has time enough for
+    // its own work, on a busy computer too.
+    const slowly = async () => (await delay(3_500), { option: 'allow' });
     const answered = await new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOG: path.join(dir, 'agent.jsonl') }), host).run(
-      spec({ cwd: dir, timeoutMs: 1_000, ask: slowly }),
+      spec({ cwd: dir, timeoutMs: 3_000, ask: slowly }),
       () => undefined,
     ).done;
     assert.deepEqual([answered.ok, answered.text], [true, 'Hello. Ran them.'], answered.error);
