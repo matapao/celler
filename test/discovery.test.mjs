@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createApp } from '@matapao/celler';
@@ -296,12 +297,12 @@ test('cell-scoped policies, BFS order, pagination, nativeDiscovery, limits, and 
         await refused(client.callTool({ name: 't1', arguments: {} }), /concurrent/);
         releaseSlow();
         await firstSlow;
-        // Native discovery lists every tool directly, even with discoveryBytes = 0.
+        // Native discovery lists every tool directly, even with discoveryBytes = 0, and nothing to search them with.
         await withClient(
           (ch, n) => app.reconnect('alice', spec.id, ch, n),
           async (nativeClient) => {
             const names = (await nativeClient.listTools()).tools.map((x) => x.name);
-            assert.ok(names.includes('t5') && !names.includes('invoke'));
+            assert.ok(names.includes('t5') && !names.includes('invoke') && !names.includes('discover'));
             // BFS order puts first's exports before second's exports.
             assert.ok(names.indexOf('t1') < names.indexOf('t4'));
           },
@@ -390,4 +391,54 @@ test("discover looks inside cells only: a tool named as within is the model's mi
     await app.start(request(app.publish([cell('root', ['t']), tool('t', { adapter: 'ok' })]))),
     text('done'),
   );
+});
+
+test("a run's server says what it holds before any tool, in the host's words: its cell on the first line, then what it reaches as an outline, cut at a whole line; and its version is this library's", async (t) => {
+  const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const graph = [
+    cell('root', ['team', 'side', 'echo', 'hidden'], { title: 'Front desk', description: 'Answers the person.' }),
+    // A description over lines stays on one; a cell in two places is told once, where it is found first.
+    cell('team', ['notes', 'ask'], { title: 'Team', description: 'Keeps\n  the notes.' }),
+    cell('side', ['team'], { title: 'Side' }),
+    tool('echo', { adapter: 'ok' }, { title: 'Echo it back' }),
+    tool('notes', { adapter: 'ok' }),
+    tool('ask', { cell: 'expert' }, { title: 'Ask the expert' }),
+    // Behind a delegation, and denied: neither is the run's to see.
+    cell('expert', ['secret'], { title: 'Expert' }),
+    tool('secret', { adapter: 'ok' }),
+    tool('hidden', { adapter: 'ok' }),
+  ];
+  const told = async (limits = {}) => {
+    let seen;
+    const app = createApp({
+      database: memoryDatabase(t),
+      adapters: new Map([['ok', { call: async () => text('ok') }]]),
+      platform: {
+        allowed: (_run, id) => id !== 'hidden',
+        launch: (_spec, connect) =>
+          withClient(connect, async (client) => {
+            seen = [client.getInstructions(), client.getServerVersion()];
+            return text('done');
+          }),
+      },
+      ...limits,
+    });
+    await app.start(request(app.publish(graph)));
+    return seen;
+  };
+  const [instructions, server] = await told();
+  assert.equal(
+    instructions,
+    [
+      'Front desk: Answers the person.',
+      '- Team: Keeps the notes.',
+      '  - notes',
+      '  - ask: Ask the expert',
+      '- Side',
+      '- echo: Echo it back',
+    ].join('\n'),
+  );
+  assert.deepEqual(server, { name: 'celler', version });
+  const [cut] = await told({ instructionsChars: 40 });
+  assert.equal(cut, 'Front desk: Answers the person.');
 });

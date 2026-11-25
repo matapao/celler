@@ -14,6 +14,8 @@ export const appLimits = {
   /** What discover gives: the results on a page, and the furthest a page starts. */
   discoveryPageSize: 5,
   discoveryOffset: 10_000,
+  /** The most a run's MCP `instructions` say: Claude Code gives its model 4,096 characters of them. */
+  instructionsChars: 4096,
   inlineLimit: INLINE_LIMIT,
   /** Delegation depth below a root run. 0 forbids delegation. */
   maxDepth: 16,

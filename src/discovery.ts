@@ -32,6 +32,46 @@ export const invokeTool = gatewayTool(
 );
 
 /** The discover tool an app's limits shape, and its JSON reply: complete definitions if they fit, else compact cards. */
+/** A title and its description on one line, as an outline holds them. */
+const titled = (title: string, description: string) => {
+  const said = description.replace(/\s+/g, ' ').trim();
+  return said ? `${title}: ${said}` : title;
+};
+
+/**
+ * What a run's MCP server holds, as MCP's `instructions` give it to an agent before any tool: the run's cell on the first
+ * line, which is all of it some agents show (Codex), then what it exports as an outline, each cell by its title and
+ * description and each tool by its name and title, a cell's own nested under it, once. All in the host's own words, cut
+ * at a whole line within `maxChars`.
+ */
+export function instructionsFor(graph: Graph, entry: string, allowed: (id: string) => boolean, maxChars: number) {
+  const reach = graph.view(entry, allowed);
+  const told = new Set<string>([entry]);
+  const root = graph.meta(entry);
+  const lines = [titled(root.title, root.description)];
+  function tell(cellId: string, depth: number) {
+    for (const child of graph.cell(cellId).exports) {
+      if (!reach.has(child) || told.has(child)) continue;
+      const node = graph.meta(child);
+      const item = '  '.repeat(depth) + '- ';
+      if (node.kind === 'tool') {
+        lines.push(item + (node.title === child ? child : `${child}: ${node.title}`));
+        continue;
+      }
+      told.add(child);
+      lines.push(item + titled(node.title, node.description));
+      tell(child, depth + 1);
+    }
+  }
+  tell(entry, 0);
+  let text = '';
+  for (const line of lines) {
+    if (text.length + line.length + 1 > maxChars) break;
+    text += line + '\n';
+  }
+  return text.trimEnd();
+}
+
 export function createDiscovery(limits: DiscoveryLimits) {
   const request = z.strictObject({
     query: z

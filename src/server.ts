@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import {
   isTerminal,
   type CreateTaskOptions,
@@ -9,12 +10,15 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult, Request, RequestId, Result, Task, Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { Calls } from './calls.js';
-import { createDiscovery, invocation, invokeTool } from './discovery.js';
+import { createDiscovery, instructionsFor, invocation, invokeTool } from './discovery.js';
 import { fail, parseWith, CellerError } from './errors.js';
 import { hash } from './json.js';
 import { taskListing, type appLimits } from './limits.js';
 import type { Runs } from './runs.js';
 import type { Run, Store } from './store.js';
+
+/** This library's own version, as its package says it, which a client sees as the server's. */
+const VERSION: string = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 /** The client's own key for a call, if it gave one: a malformed one is its mistake, answered as a protocol error. */
 function callIdOf(meta: Record<string, unknown> | undefined, maxChars: number): string | undefined {
@@ -129,15 +133,27 @@ export function createServer(runs: Runs, call: Calls['call'], store: Store, limi
   const discovery = createDiscovery(limits);
   const connections = new Map<string, Set<Server>>(); // run id → its open MCP connections
 
+  /** What the run's server holds, in its host's words; none once the run may reach nothing, or its policy fails. */
+  function instructions(run: Run): string | undefined {
+    try {
+      runs.checkAncestors(run);
+      const graph = runs.graph(run.revision);
+      return instructionsFor(graph, run.entry, runs.access(run), limits.instructionsChars) || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   async function connect(run: Run, channel: Transport, native = false) {
     const tasks = new TaskWork();
     const server = new Server(
-      { name: 'celler', version: '0.1.0' },
+      { name: 'celler', version: VERSION },
       {
         capabilities: {
           tools: { listChanged: true },
           tasks: { list: {}, cancel: {}, requests: { tools: { call: {} } } },
         },
+        instructions: instructions(run),
         taskStore: tasks,
       },
     );
@@ -157,10 +173,10 @@ export function createServer(runs: Runs, call: Calls['call'], store: Store, limi
           jsonBytes += meta.exposedBytes + (tools.length > 1 ? 1 : 0);
         }
       }
+      // An agent that searches its tools itself gets them all, and nothing to search them with besides.
+      if (native) return { tools };
       // Once a connection moves to discover and invoke it stays there, so the model's `invoke` calls keep working.
-      if (!invokeAdvertised && (native || jsonBytes <= limits.discoveryBytes)) {
-        return { tools: [...tools, discovery.tool] };
-      }
+      if (!invokeAdvertised && jsonBytes <= limits.discoveryBytes) return { tools: [...tools, discovery.tool] };
       invokeAdvertised = true;
       const pins = new Set(current.cell(run.entry).pins);
       return { tools: [...tools.filter((tool) => pins.has(tool.name)), discovery.tool, invokeTool] };

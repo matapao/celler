@@ -148,7 +148,7 @@ test("an agent that searches its tools itself is given them all, and any other g
         await platform.close();
       }
     };
-    assert.deepEqual(await listed(true), ['echo', 'notes', 'discover']);
+    assert.deepEqual(await listed(true), ['echo', 'notes']);
     assert.deepEqual(await listed(false), ['echo', 'discover', 'invoke']);
     // Claude Code and Codex each search theirs; the simulated agent calls none.
     const claude = new AgentRuntime(claudeAgent({ claude: () => null, words: claudeWords }), host);
