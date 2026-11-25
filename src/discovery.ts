@@ -41,14 +41,14 @@ const titled = (title: string, description: string) => {
 /**
  * What a run's MCP server holds, as MCP's `instructions` give it to an agent before any tool: the run's cell on the first
  * line, which is all of it some agents show (Codex), then what it exports as an outline, each cell by its title and
- * description and each tool by its name and title, a cell's own nested under it, once. All in the host's own words, cut
- * at a whole line within `maxChars`.
+ * description and each tool by its name and title, a cell's own nested under it, once. A cell with neither is no line of
+ * its own: what it holds is told at its place. All in the host's own words, cut at a whole line within `maxChars`.
  */
 export function instructionsFor(graph: Graph, entry: string, allowed: (id: string) => boolean, maxChars: number) {
   const reach = graph.view(entry, allowed);
   const told = new Set<string>([entry]);
   const root = graph.meta(entry);
-  const lines = [titled(root.title, root.description)];
+  const lines = [titled(root.title, root.description)].filter(Boolean);
   function tell(cellId: string, depth: number) {
     for (const child of graph.cell(cellId).exports) {
       if (!reach.has(child) || told.has(child)) continue;
@@ -59,8 +59,9 @@ export function instructionsFor(graph: Graph, entry: string, allowed: (id: strin
         continue;
       }
       told.add(child);
-      lines.push(item + titled(node.title, node.description));
-      tell(child, depth + 1);
+      const said = titled(node.title, node.description);
+      if (said) lines.push(item + said);
+      tell(child, said ? depth + 1 : depth);
     }
   }
   tell(entry, 0);

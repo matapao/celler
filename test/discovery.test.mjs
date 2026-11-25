@@ -396,10 +396,16 @@ test("discover looks inside cells only: a tool named as within is the model's mi
 test("a run's server says what it holds before any tool, in the host's words: its cell on the first line, then what it reaches as an outline, cut at a whole line; and its version is this library's", async (t) => {
   const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   const graph = [
-    cell('root', ['team', 'side', 'echo', 'hidden'], { title: 'Front desk', description: 'Answers the person.' }),
+    cell('root', ['team', 'side', 'echo', 'plain', 'hidden'], {
+      title: 'Front desk',
+      description: 'Answers the person.',
+    }),
     // A description over lines stays on one; a cell in two places is told once, where it is found first.
     cell('team', ['notes', 'ask'], { title: 'Team', description: 'Keeps\n  the notes.' }),
     cell('side', ['team'], { title: 'Side' }),
+    // One with neither title nor description is no line of its own: its tools are told at its place.
+    cell('plain', ['filed'], { title: '' }),
+    tool('filed', { adapter: 'ok' }),
     tool('echo', { adapter: 'ok' }, { title: 'Echo it back' }),
     tool('notes', { adapter: 'ok' }),
     tool('ask', { cell: 'expert' }, { title: 'Ask the expert' }),
@@ -408,7 +414,7 @@ test("a run's server says what it holds before any tool, in the host's words: it
     tool('secret', { adapter: 'ok' }),
     tool('hidden', { adapter: 'ok' }),
   ];
-  const told = async (limits = {}) => {
+  const told = async (limits = {}, nodes = graph) => {
     let seen;
     const app = createApp({
       database: memoryDatabase(t),
@@ -423,7 +429,7 @@ test("a run's server says what it holds before any tool, in the host's words: it
       },
       ...limits,
     });
-    await app.start(request(app.publish(graph)));
+    await app.start(request(app.publish(nodes)));
     return seen;
   };
   const [instructions, server] = await told();
@@ -436,9 +442,14 @@ test("a run's server says what it holds before any tool, in the host's words: it
       '  - ask: Ask the expert',
       '- Side',
       '- echo: Echo it back',
+      '- filed',
     ].join('\n'),
   );
   assert.deepEqual(server, { name: 'celler', version });
   const [cut] = await told({ instructionsChars: 40 });
   assert.equal(cut, 'Front desk: Answers the person.');
+  // Nor is the run's own cell, then: its outline starts at once.
+  const untitled = graph.map((node) => (node.id === 'root' ? { ...node, title: '', description: '' } : node));
+  const [outline] = await told({}, untitled);
+  assert.equal(outline.split('\n')[0], '- Team: Keeps the notes.');
 });
