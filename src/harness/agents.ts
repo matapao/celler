@@ -39,8 +39,12 @@ export interface Agent {
   features?: { args: string[]; unfit(listed: string | null): string | null };
   /** Asked of its program; `yes` reads the answer: signed in, not, or null when it can't tell. */
   signedIn: { args: string[]; anyExit?: boolean; yes(answer: string | null): boolean | null };
-  /** Its own sign-in, and what its health says when it isn't signed in. */
-  login: { args: string[]; signedOut: string };
+  /**
+   * Its own sign-in, and what its health says when it isn't signed in. `elsewhere`: its sign-in for a person whose
+   * browser is on another device, where its own waits for its page on this computer, and how it shows its one-time code
+   * (`userCode`, the code its first group matches once the output's terminal escapes are gone).
+   */
+  login: { args: string[]; signedOut: string; elsewhere?: { args: string[]; userCode: RegExp } };
   testRunMs: number;
   /** It searches its MCP tools itself, loading only those it needs: a run lists them all to it, not celler's menu. */
   nativeDiscovery: boolean;
@@ -213,6 +217,8 @@ export const CODEX_HOME_CONFIG = 'cli_auth_credentials_store = "file"\n';
 
 /** Its own sign-in only, in its home: a key or token from the shell would win over it, and an endpoint from the shell would get it. */
 const CODEX_OWN_SIGN_IN = { OPENAI_API_KEY: '', CODEX_API_KEY: '', CODEX_ACCESS_TOKEN: '', OPENAI_BASE_URL: '' };
+/** Its device code's one-time code, as `codex login --device-auth` shows it: alone on the line after it says so. */
+const CODEX_USER_CODE = /one-time code\b[^\n]*\n[ \t]*([A-Z0-9]+(?:-[A-Z0-9]+)*)[ \t]*\n/i;
 
 /** A rollout's name: when its thread started, then the thread's id; `.zst` after it once Codex has compressed it. */
 const ROLLOUT = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([^.]+)\.jsonl(?:\.zst)?$/;
@@ -263,7 +269,13 @@ export function codexAgent(o: { codex?: () => string | null; home: string; words
     oldest: agentVersions.codex,
     features: codexFeatures,
     signedIn: { args: ['login', 'status'], yes: (answer) => answer !== null },
-    login: { args: ['login'], signedOut: o.words.signedOut },
+    // Its own waits for its page at this computer's localhost; from another device, its device code's page, and the
+    // one-time code alone on the line after it says so.
+    login: {
+      args: ['login'],
+      signedOut: o.words.signedOut,
+      elsewhere: { args: ['login', '--device-auth'], userCode: CODEX_USER_CODE },
+    },
     testRunMs: harnessLimits.codexTestRunMs,
     // Its tool_search, over MCP tools it always defers.
     nativeDiscovery: true,

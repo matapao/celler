@@ -11,6 +11,7 @@
 // Codex's own: one on, and one Codex no longer has (removed), as Codex lists them.
 import { appendFileSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
@@ -23,6 +24,28 @@ if (args[0] === 'features') {
   const given = args.find((arg) => arg.startsWith('features=')) ?? '';
   for (const [, name, on] of given.matchAll(/(\w+) = (true|false)/g)) console.log(`${name.padEnd(40)} stable  ${on}`);
   console.log(`${'shell_tool'.padEnd(40)} stable  true\n${'collaboration_modes'.padEnd(40)} removed  true`);
+  process.exit(0);
+}
+// From another device, as Codex 0.171.0 shows it, escapes and all, on its error output: its page, then its code.
+if (args[0] === 'login' && args[1] === '--device-auth') {
+  const grey = (s) => `\x1b[90m${s}\x1b[0m`;
+  const blue = (s) => `\x1b[94m${s}\x1b[0m`;
+  process.stderr.write(
+    `\nWelcome to Codex [v${grey('0.171.0')}]\n${grey("OpenAI's command-line coding agent")}\n\n` +
+      'Follow these steps to sign in with ChatGPT using device code authorization:\n\n' +
+      `1. Open this link in your browser and sign in to your account\n   ${blue('https://auth.openai.com/codex/device')}\n\n`,
+  );
+  await delay(100);
+  if (process.env.FAKE_CODEX_DEVICE_REFUSED) {
+    process.stderr.write('Error: device code login is not enabled\n');
+    process.exit(1);
+  }
+  process.stderr.write(
+    `2. Enter this one-time code ${grey('(expires in 15 minutes)')}\n   ${blue('FAKE-12345')}\n\n` +
+      `${grey('Continue only if you started this login in Codex. If a website or another person gave you this code, cancel.')}\n`,
+  );
+  // It waits for the person until it is called off, and does nothing else.
+  await delay(60_000);
   process.exit(0);
 }
 if (args[0] === 'login') {

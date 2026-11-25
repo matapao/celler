@@ -2,6 +2,7 @@
 // the run's end ends with everything they started; and the agent's own sign-in.
 
 import { execFile, spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { stripVTControlCharacters } from 'node:util';
 import { harnessLimits as L } from '../limits.js';
 import type { Turn } from './runtime.js';
 import type { AgentLogin } from './types.js';
@@ -113,7 +114,13 @@ export class RunProcesses {
 const LOGIN_URL = /https:\/\/[^\s\x00-\x1f\x7f"'`)\]}>]+(?=[\s\x00-\x1f\x7f"'`)\]}>])/;
 
 /** An agent's own sign-in: it opens the browser and prints the page's address; a code the page shows goes to its input. */
-export function startLogin(program: string, args: string[], env: NodeJS.ProcessEnv): AgentLogin {
+export function startLogin(
+  program: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  /** Where it shows its one-time code, as the agent's `login.elsewhere.userCode`: there is none without it. */
+  shown?: RegExp,
+): AgentLogin {
   const child: ChildProcess = spawn(program, args, {
     env,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -126,32 +133,53 @@ export function startLogin(program: string, args: string[], env: NodeJS.ProcessE
   const said = { stdout: '', stderr: '' };
   let gotUrl: (u: string | null) => void = () => undefined;
   const url = new Promise<string | null>((resolve) => (gotUrl = resolve));
-  // Its page's address on either of its outputs: an agent may print it on its error output.
+  let gotCode: (c: string | null) => void = () => undefined;
+  const userCode = shown && new Promise<string | null>((resolve) => (gotCode = resolve));
+  // Its page's address on either of its outputs, and its code: an agent may print them on its error output.
   for (const output of ['stdout', 'stderr'] as const) {
     child[output]?.on('data', (c: Buffer) => {
       said[output] = (said[output] + c.toString('utf8')).slice(-L.stderrChars);
       const m = LOGIN_URL.exec(said[output]);
       if (m) gotUrl(m[0]);
+      const code = shown?.exec(stripVTControlCharacters(said[output]))?.[1];
+      if (code) gotCode(code);
     });
   }
   child.stdin?.on('error', () => undefined);
-  const timer = setTimeout(() => killTree(child), L.loginMs);
+  // Ended here, it says so, not what it said last: Codex's last line from another device is its warning.
+  let endedHere: string | undefined;
+  const end = (why: string) => {
+    endedHere ??= why;
+    killTree(child);
+  };
+  const timer = setTimeout(() => end(`Sign-in left open for ${L.loginMs / 60_000} min`), L.loginMs);
   const done = new Promise<{ ok: boolean; error?: string }>((resolve) => {
     failed = (err) => {
       clearTimeout(timer);
       gotUrl(null);
+      gotCode(null);
       resolve({ ok: false, error: err.message });
     };
     child.on('close', (code) => {
       clearTimeout(timer);
       gotUrl(null);
-      const last = (text: string) => text.trim().split('\n').filter(Boolean).at(-1);
+      gotCode(null);
+      const last = (text: string) => stripVTControlCharacters(text).trim().split('\n').filter(Boolean).at(-1);
       resolve(
         code === 0
           ? { ok: true }
-          : { ok: false, error: last(said.stderr) ?? last(said.stdout) ?? `Login ended with code ${code}` },
+          : {
+              ok: false,
+              error: endedHere ?? last(said.stderr) ?? last(said.stdout) ?? `Login ended with code ${code}`,
+            },
       );
     });
   });
-  return { url, done, sendCode: (code) => void child.stdin?.write(`${code.trim()}\n`), cancel: () => killTree(child) };
+  return {
+    url,
+    ...(userCode ? { userCode } : {}),
+    done,
+    sendCode: (code) => void child.stdin?.write(`${code.trim()}\n`),
+    cancel: () => end('Sign-in called off'),
+  };
 }

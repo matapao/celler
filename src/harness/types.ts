@@ -157,9 +157,14 @@ export interface RuntimeHealth {
   fix?: 'find' | 'login';
 }
 
-/** An agent's own sign-in in progress: its page once printed, its end, and a code pasted back for a page that shows one. */
+/**
+ * An agent's own sign-in in progress: its page once printed, its end, and a code pasted back for a page that shows one;
+ * or, from another device, a one-time code of its own for the person to enter on its page.
+ */
 export interface AgentLogin {
   url: Promise<string | null>;
+  /** The one-time code it shows for its page, where it shows one; null once it ended without it. */
+  userCode?: Promise<string | null>;
   done: Promise<{ ok: boolean; error?: string }>;
   sendCode(code: string): void;
   /** Called off: its program ends, and `done` with it. */

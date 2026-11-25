@@ -158,16 +158,24 @@ export class AgentRuntime implements Runtime {
     }
   }
 
-  /** Starts the agent's own sign-in, or says why it can't. It never throws. */
-  login(): AgentLogin | { error: string } {
+  /**
+   * Starts the agent's own sign-in, or says why it can't. It never throws. `elsewhere`: the person signs in from a
+   * browser on another device, as for a computer with no screen. An agent whose own sign-in waits for its page on this
+   * computer (Codex's) then shows a link and a one-time code to enter there (`userCode`); Claude Code's works from
+   * anywhere as it is.
+   */
+  login(o: { elsewhere?: boolean } = {}): AgentLogin | { error: string } {
     try {
       const found = this.agent.find();
       if (typeof found !== 'string') return { error: found.missing };
       this.agent.ready?.();
+      const { args, elsewhere } = this.agent.login;
+      const from = o.elsewhere ? elsewhere : undefined;
       return startLogin(
         this.agent.started(found).program,
-        this.agent.login.args,
+        from?.args ?? args,
         agentEnv(this.agent.env(this.host), this.host),
+        from?.userCode,
       );
     } catch (err) {
       return { error: `${this.agent.name}'s sign-in could not start: ${errorText(err).slice(0, L.errorChars)}` };

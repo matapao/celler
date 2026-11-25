@@ -323,3 +323,36 @@ test("an agent's own sign-in gives its page's address as it is, from either of i
     assert.equal(ended.ok, false);
   }
 });
+
+test("from another device, Codex's sign-in shows its page and a one-time code of its own, and Claude Code's is as it is", async () => {
+  const within = (p) => Promise.race([p, delay(5_000).then(() => 'nothing in 5 s')]);
+  const codex = new AgentRuntime(fakeCodex(codexHome), host);
+  const device = codex.login({ elsewhere: true });
+  try {
+    // Its page, then its code, which comes after it: each as it is, its terminal escapes gone.
+    assert.equal(await within(device.url), 'https://auth.openai.com/codex/device');
+    assert.equal(await within(device.userCode), 'FAKE-12345');
+  } finally {
+    device.cancel();
+  }
+  // Called off, it says so, not the warning it showed last.
+  assert.deepEqual(await within(device.done), { ok: false, error: 'Sign-in called off' });
+  // Refused before it showed one: no code, and why.
+  const refused = new AgentRuntime(fakeCodex(codexHome, { FAKE_CODEX_DEVICE_REFUSED: '1' }), host).login({
+    elsewhere: true,
+  });
+  assert.equal(await within(refused.userCode), null);
+  assert.deepEqual(await within(refused.done), { ok: false, error: 'Error: device code login is not enabled' });
+  // Its own on this computer, and Claude Code's from anywhere: no code of their own.
+  const own = codex.login();
+  assert.equal('userCode' in own, false);
+  assert.equal((await within(own.done)).ok, true);
+  const url = 'https://claude.ai/oauth/authorize?code=true&client_id=fake-id';
+  const claude = new AgentRuntime(fakeClaude({ FAKE_CLAUDE_LOGIN_URL: url }), host).login({ elsewhere: true });
+  try {
+    assert.equal(await within(claude.url), url);
+    assert.equal('userCode' in claude, false);
+  } finally {
+    claude.cancel();
+  }
+});
