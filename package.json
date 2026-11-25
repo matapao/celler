@@ -29,7 +29,7 @@
   "scripts": {
     "build": "tsc",
     "test": "pnpm run build && node --test test/*.test.mjs",
-    "test:coverage": "pnpm run build && c8 node --test test/*.test.mjs",
+    "test:coverage": "pnpm run build && node --test --experimental-test-coverage --test-coverage-include='dist/**' test/*.test.mjs",
     "lint": "pnpm run build && oxlint --type-aware --deny-warnings src test scripts && knip",
     "lint:style": "oxlint --type-aware -D no-nested-ternary -D typescript/no-explicit-any src test scripts && prettier --check .",
     "format": "prettier --write .",
@@ -48,7 +48,6 @@
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
     "@types/node": "^24.19.2",
-    "c8": "12.0.0",
     "knip": "6.45.1",
     "oxlint": "1.94.0",
     "oxlint-tsgolint": "7.0.2007",
