@@ -7,8 +7,21 @@ test('publication validates every edge including delegation targets', (t) => {
   const database = memoryDatabase(t);
   const app = createApp({ database, adapters: new Map([['ok', { call: async () => text('ok') }]]), platform: {} });
   assert.throws(() => app.publish([cell('a', ['missing'])]), /Unknown node/);
-  assert.throws(() => app.publish([cell('a', ['b']), cell('b', ['a'])]), /Cycle/);
-  assert.throws(() => app.publish([cell('a', ['go']), tool('go', { cell: 'a' })]), /Cycle/);
+  // A cycle is named, from its node declared first, through exports and delegation alike.
+  const cycle = (...through) => ({ message: 'Cycle through exports or delegation: ' + through.join(' → ') });
+  assert.throws(() => app.publish([cell('a', ['b']), cell('b', ['a'])]), cycle('a', 'b', 'a'));
+  assert.throws(() => app.publish([cell('a', ['go']), tool('go', { cell: 'a' })]), cycle('a', 'go', 'a'));
+  // Only the cycle, not what leads into it or out of it.
+  const around = [
+    cell('root', ['a']),
+    cell('a', ['b', 'leaf']),
+    cell('b', ['go']),
+    tool('go', { cell: 'a' }),
+    cell('leaf', []),
+  ];
+  assert.throws(() => app.publish(around), cycle('a', 'b', 'go', 'a'));
+  // Declared the other way round, it starts at go, declared first of the cycle then.
+  assert.throws(() => app.publish([...around].reverse()), cycle('go', 'a', 'b', 'go'));
   assert.throws(() => app.publish([cell('a', [], { pins: ['bogus'] })]), /Invalid pin/);
   assert.throws(
     () => app.publish([cell('a', ['t'], { pins: ['t', 't'] }), tool('t', { adapter: 'ok' })]),

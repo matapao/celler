@@ -148,6 +148,30 @@ export function createSchemas(limits: { schemaCacheSize: number; urlChars: numbe
 export type Schemas = ReturnType<typeof createSchemas>;
 
 /**
+ * A cycle among the nodes a topological sort left over, in the order its links go, its first node again at its end.
+ * Each of them has a link from another of them, so walking back from one comes round to a node it has passed: from
+ * there on, the walk is the cycle.
+ */
+function cycleAmong(left: ReadonlySet<string>, edges: ReadonlyMap<string, string[]>): string[] {
+  const linkedFrom = new Map<string, string>();
+  for (const [from, links] of edges) {
+    if (!left.has(from)) continue;
+    for (const link of links) if (left.has(link) && !linkedFrom.has(link)) linkedFrom.set(link, from);
+  }
+  const walked: string[] = [];
+  let node = [...left][0];
+  while (!walked.includes(node)) {
+    walked.push(node);
+    node = linkedFrom.get(node)!;
+  }
+  const cycle = walked.slice(walked.indexOf(node)).reverse();
+  // From its node declared first.
+  const start = cycle.indexOf([...left].find((id) => cycle.includes(id))!);
+  const declared = [...cycle.slice(start), ...cycle.slice(0, start)];
+  return [...declared, declared[0]];
+}
+
+/**
  * Compiles a graph with an app's validators. Publishing also checks it against the host's adapters and the rules a
  * stored revision may predate, so a stored revision always loads, and retiring an adapter fails only its own calls.
  */
@@ -259,7 +283,10 @@ export function compileGraph(config: unknown, schemas: Schemas, publishing?: { a
       if (left === 0) ready.push(link);
     }
   }
-  if (visited !== rows.length) fail('INVALID_CONFIG', 'Cycle through exports or delegation');
+  if (visited !== rows.length) {
+    const loop = cycleAmong(new Set(rows.map((node) => node.id).filter((id) => incoming.get(id)! > 0)), edges);
+    fail('INVALID_CONFIG', 'Cycle through exports or delegation: ' + loop.join(' → '));
+  }
 
   // Everything an entry can browse, each node with the cells that export it. BFS keeps declared export order
   // and asks `allowed` at most once per node.
