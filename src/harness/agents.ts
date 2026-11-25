@@ -9,7 +9,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { agentVersions, harnessLimits } from '../limits.js';
 import { runClaude } from './claude.js';
-import { runCodex } from './codex.js';
+import { codexFeatures, runCodex } from './codex.js';
 import { codexProgram, findProgram, realProgram, type AgentProgram } from './programs.js';
 import type { Turn } from './runtime.js';
 import type { ClaudeWords, CodexWords, Host, ModelTier, RunResult } from './types.js';
@@ -32,6 +32,11 @@ export interface Agent {
   homeVariable: string;
   /** The oldest version of it that runs, as its `--version` says it (limits.ts agentVersions). */
   oldest: string;
+  /**
+   * Its features, as its program lists them under the settings a run gives it (`args`), and why they don't run here
+   * (`unfit`), or null: asked before its first run and in its health, as its version is (versions.ts).
+   */
+  features?: { args: string[]; unfit(listed: string | null): string | null };
   /** Asked of its program; `yes` reads the answer: signed in, not, or null when it can't tell. */
   signedIn: { args: string[]; anyExit?: boolean; yes(answer: string | null): boolean | null };
   /** Its own sign-in, and what its health says when it isn't signed in. */
@@ -256,6 +261,7 @@ export function codexAgent(o: { codex?: () => string | null; home: string; words
     env: () => ({ ...CODEX_OWN_SIGN_IN, CODEX_HOME: o.home }),
     homeVariable: 'CODEX_HOME',
     oldest: agentVersions.codex,
+    features: codexFeatures,
     signedIn: { args: ['login', 'status'], yes: (answer) => answer !== null },
     login: { args: ['login'], signedOut: o.words.signedOut },
     testRunMs: harnessLimits.codexTestRunMs,

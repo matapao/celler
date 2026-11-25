@@ -32,7 +32,7 @@ import {
   type RuntimeHealth,
   type RunSpec,
 } from './types.js';
-import { unfitVersion, versionOf } from './versions.js';
+import { unfitFeatures, unfitVersion, versionOf } from './versions.js';
 
 /** What one run of an agent is given, the same whichever SDK runs it. */
 export interface Turn {
@@ -117,15 +117,17 @@ export class AgentRuntime implements Runtime {
     agent.ready?.();
     const { program } = agent.started(found);
     const env = agentEnv(agent.env(this.host), this.host);
-    const [version, answer] = await Promise.all([
+    const [version, answer, features] = await Promise.all([
       versionOf(program, env, agent.oldest),
       runForOutput(program, agent.signedIn.args, env, agent.signedIn.anyExit),
+      unfitFeatures(agent, program, env),
     ]);
     const unfit = unfitVersion(agent, found, version);
     if (unfit) return { ok: false, checkedAt, program: found, detail: unfit };
     const named = `${agent.name} ${version}`;
     if (agent.signedIn.yes(answer) === false)
       return { ok: false, checkedAt, program: found, fix: 'login', detail: `${named} · ${agent.login.signedOut}` };
+    if (features) return { ok: false, checkedAt, program: found, detail: `${named} ${features}.` };
     if (!deep) return { ok: true, checkedAt, program: found, detail: `${named} (not yet test-run)` };
     // In an empty folder of its own, which no other program or person shares, gone after it.
     const folder = mkdtempSync(path.join(os.tmpdir(), 'celler-test-run-'));
@@ -244,10 +246,10 @@ export class AgentRuntime implements Runtime {
     const cleaned = new Promise<void>((resolve) => {
       markCleaned = resolve;
     });
-    // Never a program older than its SDK is made with. Each program is asked once, and again once it changes: known, as
-    // after a health check, its agent starts as the run does.
-    const begin = (version: string | null): Promise<RunResult> => {
-      const unfit = unfitVersion(agent, found, version);
+    // Never a program older than its SDK is made with, nor one whose features aren't as they must be. Each program is
+    // asked once, and again once it changes: known, as after a health check, its agent starts as the run does.
+    const begin = (version: string | null, features: string | null): Promise<RunResult> => {
+      const unfit = unfitVersion(agent, found, version) ?? (features && `${agent.name} ${version} ${features}.`);
       if (unfit) return Promise.resolve(failure(unfit, true));
       // Stopped while it was asked: it doesn't start (end says why).
       if (over()) return Promise.resolve(failure(''));
@@ -258,7 +260,10 @@ export class AgentRuntime implements Runtime {
       }
     };
     const version = versionOf(started.program, errands, agent.oldest);
-    const done = (typeof version === 'string' ? begin(version) : version.then(begin))
+    const features = unfitFeatures(agent, started.program, errands);
+    const known = typeof version === 'string' && !(features instanceof Promise);
+    const begun = known ? begin(version, features) : Promise.all([version, features]).then(([v, f]) => begin(v, f));
+    const done = begun
       .then(end, (err: unknown) => end(failure(errorText(err).slice(0, L.errorChars))))
       .finally(() => {
         markStarted();

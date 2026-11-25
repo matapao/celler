@@ -155,12 +155,16 @@ test("Codex runs in a profile of the run's own, its folder written at work and o
       (await started({ purpose: 'read' })).configs.find((c) => c.startsWith('permissions=')),
       /":workspace_roots" = \{ "\." = "read"/,
     );
-    // A model-only decision runs no command and gets no MCP server.
+    // A model-only decision runs no command, starts no helper, asks the person nothing, and gets no MCP server.
     const decided = await started({ purpose: 'inference', mcpServers: [github] });
-    assert.match(
-      decided.configs.find((c) => c.startsWith('features=')),
-      /shell_tool = false/,
-    );
+    const features = decided.configs.find((c) => c.startsWith('features='));
+    for (const feature of ['shell_tool', 'sleep_tool', 'goals'])
+      assert.match(features, new RegExp(`${feature} = false`));
+    for (const setting of [
+      'agents={ enabled = false }',
+      'tools={ experimental_request_user_input = { enabled = false } }',
+    ])
+      assert.ok(decided.configs.includes(setting), decided.configs.join('\n'));
     assert.equal(
       decided.configs.some((c) => c.startsWith('mcp_servers=')),
       false,

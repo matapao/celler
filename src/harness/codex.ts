@@ -15,6 +15,7 @@ import {
 import { harnessLimits as L } from '../limits.js';
 import { VALUES } from './programs.js';
 import { forThisSystem, promptOf, saysSignedOut, type Turn } from './runtime.js';
+import { CODEX_FEATURES, CODEX_FEATURES_ON } from './sandbox/codex-features.js';
 import { codexOnLinux } from './sandbox/codex.linux.js';
 import { codexOnMacos } from './sandbox/codex.macos.js';
 import { codexOnWindows } from './sandbox/codex.windows.js';
@@ -34,6 +35,15 @@ const EFFORTS: ModelReasoningEffort[] = ['minimal', 'low', 'medium', 'high', 'xh
 const PICTURES = /^image\/(png|jpeg|gif|webp)$/i;
 /** What it says when it isn't signed in itself for the host. */
 const SIGN_IN_RE = /\b401\b|unauthori[sz]ed|not logged in|codex login/i;
+/**
+ * A model-only decision's own settings: no command, no helper, no question to the person and no sleep. Its model comes
+ * with two tools no setting takes away: its patch tool, which writes only in the run's scratch there, and its clock.
+ */
+const MODEL_ONLY = {
+  agents: { enabled: false },
+  tools: { experimental_request_user_input: { enabled: false } },
+  features: { ...CODEX_FEATURES, shell_tool: false, sleep_tool: false },
+};
 /** A command as it ran it, through its shell (`/bin/zsh -lc 'npm test'`), as it was given (`npm test`). */
 const IN_SHELL = /^(?:\S*\/)?(?:ba|z)?sh -l?c (['"])([\s\S]*)\1$/;
 
@@ -66,9 +76,8 @@ function settingsFor(t: Turn): { settings: string[]; values: Record<string, stri
   const { spec } = t;
   const own = forThisSystem(CODEX_ON, 'Codex')(t.places, spec.purpose === 'work' ? 'work' : 'read');
   const values: Record<string, string> = {};
-  // A model-only decision runs no command, and gets no MCP server, not even the run's own.
-  if (spec.purpose === 'inference')
-    return { settings: overrides({ ...own, features: { ...own.features, shell_tool: false } }), values };
+  // A model-only decision gets no MCP server, not even the run's own.
+  if (spec.purpose === 'inference') return { settings: overrides({ ...own, ...MODEL_ONLY }), values };
   const valueOf = (value: string) => {
     const name = `${VALUES}${Object.keys(values).length}`;
     values[name] = value;
@@ -89,6 +98,43 @@ function settingsFor(t: Turn): { settings: string[]; values: Record<string, stri
   );
   return { settings: overrides({ ...own, mcp_servers: servers }), values };
 }
+
+/** A line of Codex's list of its features: its name, its stage (a word or more) and whether it is on. */
+const FEATURE_LINE = /^(\S+)\s+(\S.*?)\s+(true|false)$/;
+
+/**
+ * Why Codex's features, as it lists them under its settings, don't run here, or null: each it is given stands as
+ * given, and none other is on but those celler lets be (codex-features.ts). One it lists as removed does nothing.
+ */
+function unfitFeatures(listed: string | null): string | null {
+  const features = new Map<string, { on: boolean; removed: boolean }>();
+  for (const line of (listed ?? '').split('\n')) {
+    const match = FEATURE_LINE.exec(line.trim());
+    if (match) features.set(match[1], { on: match[3] === 'true', removed: match[2] === 'removed' });
+  }
+  if (!features.size) return "couldn't list its features";
+  const given: Record<string, boolean> = CODEX_FEATURES;
+  const standsAsGiven = (name: string) => {
+    const feature = features.get(name);
+    return feature !== undefined && (feature.removed || feature.on === given[name]);
+  };
+  const decided = (name: string) => name in given || CODEX_FEATURES_ON.has(name);
+  const unset = Object.keys(given).filter((name) => !standsAsGiven(name));
+  const undecided = [...features]
+    .filter(([name, feature]) => feature.on && !feature.removed && !decided(name))
+    .map(([name]) => name);
+  const why = [
+    unset.length ? `doesn't take ${unset.join(', ')} as celler sets them` : '',
+    undecided.length ? `turns on ${undecided.join(', ')}, which celler hasn't decided on` : '',
+  ].filter(Boolean);
+  return why.length ? `${why.join(', and ')}: it runs once celler is made for this version` : null;
+}
+
+/** Codex's own list of its features under the features a run gives it, and why they don't run here. */
+export const codexFeatures = {
+  args: ['features', 'list', ...overrides({ features: CODEX_FEATURES }).flatMap((setting) => ['--config', setting])],
+  unfit: unfitFeatures,
+};
 
 /** The cells' texts, then the person's words, set apart by a rule, and the files given with them; pictures to see too. */
 function inputOf(spec: RunSpec): UserInput[] {

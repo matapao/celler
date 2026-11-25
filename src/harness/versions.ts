@@ -1,5 +1,5 @@
 // An agent's program's version, as it says it: whether it is new enough to run here, and known once it has said one
-// that is, until its file changes.
+// that is, until its file changes. So are the features it lists, for an agent that lists them (Agent.features).
 
 import { statSync } from 'node:fs';
 import type { Agent } from './agents.js';
@@ -51,4 +51,27 @@ export function unfitVersion(agent: Agent, found: string, version: string | null
   if (older(version, agent.oldest))
     return `${agent.name} ${version} is older than ${agent.oldest}, the oldest that runs here: update it.`;
   return null;
+}
+
+/** Each program whose features were as they must be, by its file as it was asked (fileOf). */
+const fitFeatures = new Set<string>();
+
+/**
+ * Why the features an agent's program lists don't run here, or null: known at once once they do, until its file
+ * changes. One that doesn't is asked again each time, as a version too old is.
+ */
+export function unfitFeatures(
+  agent: Agent,
+  program: string,
+  env: NodeJS.ProcessEnv,
+): string | null | Promise<string | null> {
+  const { features } = agent;
+  if (!features) return null;
+  const file = fileOf(program);
+  if (file && fitFeatures.has(file)) return null;
+  return runForOutput(program, features.args, env).then((listed) => {
+    const unfit = features.unfit(listed);
+    if (file && !unfit) fitFeatures.add(file);
+    return unfit;
+  });
 }

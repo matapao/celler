@@ -7,6 +7,7 @@ import { AgentRuntime } from '@matapao/celler/harness';
 import { claudeOnLinux } from '../dist/harness/sandbox/claude.linux.js';
 import { claudeOnMacos } from '../dist/harness/sandbox/claude.macos.js';
 import { claudeOnWindows } from '../dist/harness/sandbox/claude.windows.js';
+import { CODEX_FEATURES, CODEX_FEATURES_ON } from '../dist/harness/sandbox/codex-features.js';
 import { codexOnLinux } from '../dist/harness/sandbox/codex.linux.js';
 import { codexOnMacos } from '../dist/harness/sandbox/codex.macos.js';
 import { codexOnWindows } from '../dist/harness/sandbox/codex.windows.js';
@@ -237,14 +238,11 @@ test("each harness's settings for each system keep its commands to the folder an
         at,
       );
       assert.deepEqual([own.settings.disableClaudeAiConnectors, own.settings.autoMemoryEnabled], [true, false], at);
-      // Its own tools are a list: none that reach outside the computer, those a coding agent works with, and to read,
-      // none that write: no commands either, which its sandbox always lets write its working folder.
-      for (const tool of ['WebFetch', 'WebSearch', 'RemoteTrigger', 'PushNotification', 'DesignSync', 'SendToProject'])
-        assert.equal(own.tools.includes(tool), false, `${at}: ${tool}`);
-      for (const tool of ['Read', 'Glob', 'Grep', 'Agent', 'ToolSearch', 'AskUserQuestion'])
-        assert.ok(own.tools.includes(tool), `${at}: ${tool}`);
-      for (const tool of ['Write', 'Edit', 'NotebookEdit', 'Bash', 'TaskStop'])
-        assert.equal(own.tools.includes(tool), purpose === 'work', `${at}: ${tool}`);
+      // Its own tools are a list, each one decided: none that reach outside the computer, those a coding agent works
+      // with, and to read, none that write: no commands either, which its sandbox always lets write its working folder.
+      const reading = ['Read', 'Glob', 'Grep', 'Agent', 'ToolSearch', 'AskUserQuestion'];
+      const writing = ['Write', 'Edit', 'NotebookEdit', 'Bash', 'TaskStop'];
+      assert.deepEqual([...own.tools].sort(), (purpose === 'work' ? [...reading, ...writing] : reading).sort(), at);
       // On Linux its sandbox skips a pattern for what its commands may not write: the agents' settings at the folder's
       // top are named in full there, there or not.
       const named = AGENT_SETTINGS.map((name) => `${p.folder}/${name}`);
@@ -285,8 +283,12 @@ test("each harness's settings for each system keep its commands to the folder an
         for (const pattern of [`**/${name}`, `**/${name}/**`])
           assert.equal(folder[pattern], 'deny', `${at}: ${pattern}`);
       }
-      // Beyond the sandbox refused, never asked; no web search, no image read from anywhere, no plugins, hooks or memories.
+      // Beyond the sandbox refused, never asked; no web search, no image read from anywhere, no plugins, hooks or
+      // memories, no skills it comes with, no goals it keeps after its turn, no pictures made, no MCP server installed:
+      // its features are every system's, and celler lets none other be on but those it has decided on.
       assert.deepEqual([own.approval_policy, own.web_search], ['never', 'disabled'], at);
+      assert.deepEqual(own.skills, { bundled: { enabled: false } }, at);
+      assert.equal(own.features, CODEX_FEATURES, at);
       for (const feature of [
         'view_image',
         'apps',
@@ -296,9 +298,13 @@ test("each harness's settings for each system keep its commands to the folder an
         'browser_use',
         'browser_use_external',
         'computer_use',
+        'goals',
+        'image_generation',
+        'skill_mcp_dependency_install',
       ]) {
         assert.equal(own.features[feature], false, `${at}: ${feature}`);
       }
+      for (const feature of Object.keys(own.features)) assert.equal(CODEX_FEATURES_ON.has(feature), false, feature);
       // Its commands get Codex's core variables only, nothing named like a key, secret or token, and the run's own home,
       // temporary folder and caches.
       assert.deepEqual(

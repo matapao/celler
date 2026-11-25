@@ -7,7 +7,8 @@
 // FAKE_CODEX_IGNORE_STOP, it never ends its turn and takes no notice of SIGTERM, and writes its pid there. Its
 // `delete --force <id>` deletes a thread as Codex's own deletion does, as far as a test sees it: its rollouts and its
 // line in session_index.jsonl in CODEX_HOME, never through a link. It refuses a thread it doesn't have, as Codex does,
-// and any with FAKE_CODEX_DELETE_REFUSED.
+// and any with FAKE_CODEX_DELETE_REFUSED. Its `features list` lists the features it is given, as given, then two of
+// Codex's own: one on, and one Codex no longer has (removed), as Codex lists them.
 import { appendFileSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -16,6 +17,12 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 const args = process.argv.slice(2);
 if (args[0] === '--version') {
   console.log('codex-cli 0.171.0');
+  process.exit(0);
+}
+if (args[0] === 'features') {
+  const given = args.find((arg) => arg.startsWith('features=')) ?? '';
+  for (const [, name, on] of given.matchAll(/(\w+) = (true|false)/g)) console.log(`${name.padEnd(40)} stable  ${on}`);
+  console.log(`${'shell_tool'.padEnd(40)} stable  true\n${'collaboration_modes'.padEnd(40)} removed  true`);
   process.exit(0);
 }
 if (args[0] === 'login') {

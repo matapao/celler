@@ -68,6 +68,52 @@ test("Codex's health says, in the host's words, when it isn't found, when it is 
     );
   }));
 
+test("Codex runs only with its features as celler decides them: one it doesn't take as given, or one more it turns on, stops its runs and its health, and is asked again each time", () =>
+  inFolder(async (dir) => {
+    const asked = path.join(dir, 'asked.log');
+    const own = path.join(dir, 'own');
+    const program = path.join(dir, 'codex');
+    // A Codex CLI, signed in, that lists the features it is given as given, then its own, in `own`; nothing else.
+    writeFileSync(
+      program,
+      [
+        '#!/usr/bin/env node',
+        'const fs = require("node:fs")',
+        'const [what, ...rest] = process.argv.slice(2)',
+        `if (what === "--version") console.log("codex-cli ${agentVersions.codex}")`,
+        'else if (what === "login") console.log("Logged in using ChatGPT")',
+        'else if (what === "features") {',
+        `  fs.appendFileSync(${JSON.stringify(asked)}, "asked\\n")`,
+        '  const given = rest.find((arg) => arg.startsWith("features=")) ?? ""',
+        '  for (const [, name, on] of given.matchAll(/(\\w+) = (true|false)/g)) console.log(name + "  stable  " + on)',
+        `  process.stdout.write(fs.readFileSync(${JSON.stringify(own)}, "utf8"))`,
+        '} else process.exit(1)',
+      ].join('\n'),
+    );
+    chmodSync(program, 0o755);
+    const runtime = new AgentRuntime(codexAgent({ codex: () => program, home: codexHome, words: codexWords }), host);
+    const named = `Codex ${agentVersions.codex}`;
+    const ends = ': it runs once celler is made for this version.';
+    for (const [listed, why] of [
+      ['brand_new_tool   stable   true\n', `${named} turns on brand_new_tool, which celler hasn't decided on${ends}`],
+      ['goals   stable   true\n', `${named} doesn't take goals as celler sets them${ends}`],
+    ]) {
+      writeFileSync(own, listed);
+      const health = await runtime.health(false);
+      assert.deepEqual([health.ok, health.detail], [false, why]);
+      const run = await runtime.run(spec({ cwd: dir }), () => undefined).done;
+      assert.deepEqual([run.ok, run.runtimeDown, run.error], [false, true, why]);
+    }
+    // Asked each time; then, with only what celler has decided on, and one Codex no longer has, it runs.
+    assert.equal(readFileSync(asked, 'utf8'), 'asked\n'.repeat(4));
+    writeFileSync(
+      own,
+      'shell_tool   stable   true\nbrand_new_tool   removed   true\nmulti_agent   deprecated   true\n',
+    );
+    const fit = await runtime.health(false);
+    assert.deepEqual([fit.ok, fit.detail], [true, `${named} (not yet test-run)`]);
+  }));
+
 test("each agent's oldest program that runs is the one its installed SDK is made with", () => {
   const sdk = (name) =>
     JSON.parse(readFileSync(fileURLToPath(new URL(`../node_modules/${name}/package.json`, import.meta.url)), 'utf8'));

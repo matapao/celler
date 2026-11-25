@@ -11,9 +11,12 @@
 //   folders, which other programs share (their temporary files are in the scratch): there, only the folder, PATH's
 //   folders and what the host adds; nor Codex's own home (CODEX_HOME), its settings and sign-in, wherever it is;
 // - their environment is Codex's core variables and the run's own home and temporary folders;
-// - no web search, no image read from anywhere on the computer, no plugins, hooks or memories.
+// - no web search, no image read from anywhere on the computer, no plugins, hooks or memories, no skills it comes with,
+//   no goals it keeps after its turn and no pictures made; and no feature on that celler hasn't decided on
+//   (codex-features.ts).
 
 import path from 'node:path';
+import { CODEX_FEATURES } from './codex-features.js';
 import { AGENT_SETTINGS, type Places } from './places.js';
 
 /** The folder's own settings for the agents celler runs, wherever they are in it: never written, and so not read. */
@@ -68,16 +71,8 @@ export function codexOnMacos(p: Places, purpose: 'work' | 'read') {
         GIT_CONFIG_GLOBAL: '/dev/null',
       },
     },
-    features: {
-      view_image: false,
-      prefer_mxc: true,
-      apps: false,
-      plugins: false,
-      hooks: false,
-      memories: false,
-      browser_use: false,
-      browser_use_external: false,
-      computer_use: false,
-    },
+    // None of the skills Codex comes with: what celler's tools don't do, a run can't either.
+    skills: { bundled: { enabled: false } },
+    features: CODEX_FEATURES,
   };
 }

@@ -31,7 +31,6 @@ const WORK_TOOLS = [
   'TaskStop',
   'Agent',
   'ToolSearch',
-  'TodoWrite',
   'AskUserQuestion',
 ];
 /** Those that can change the folder, which a run to read doesn't have: its commands, and stopping one, among them. */
