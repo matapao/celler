@@ -1,6 +1,6 @@
 {
   "name": "@matapao/celler",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "An MCP gateway for agent harnesses: a published graph of cells and tools, with grants, delegation, an audit log and an approval inbox for everything that leaves the host",
   "license": "MIT",
   "repository": {
