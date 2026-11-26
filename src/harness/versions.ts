@@ -10,7 +10,8 @@ const versionIn = (said: string) => /\d+\.\d+\.\d+/.exec(said)?.[0] ?? null;
 
 /** Whether a version ("2.1.300") is older than another, part by part. */
 function older(version: string, than: string): boolean {
-  const [a, b] = [version, than].map((v) => v.split('.').map(Number));
+  const a = version.split('.').map(Number);
+  const b = than.split('.').map(Number);
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
     if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0);
   }

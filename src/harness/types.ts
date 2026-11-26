@@ -116,7 +116,7 @@ export interface RunResult {
 
 export interface RunHandle {
   /** Its agent's process, once it started, where the runtime knows it. */
-  pid?: number;
+  pid?: number | undefined;
   /** Settles once its agent has started, or once it won't: `pid` is known from then. */
   started?: Promise<void>;
   done: Promise<RunResult>;

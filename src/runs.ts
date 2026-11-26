@@ -240,7 +240,7 @@ export function createRuns(
     args: Args,
     key: string,
     signal: AbortSignal,
-    { heartbeat, asTask = false }: { heartbeat?: () => void; asTask?: boolean } = {},
+    { heartbeat, asTask = false }: { heartbeat?: (() => void) | undefined; asTask?: boolean } = {},
   ): Promise<CallToolResult> {
     const calls = delegations.get(run.id) ?? new Map<string, Delegated>();
     delegations.set(run.id, calls);

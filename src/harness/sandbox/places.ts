@@ -312,7 +312,7 @@ export function placesFor(o: {
   scratch: Places['scratch'];
   agentHomes: string[];
   path: string;
-  readable?: string[];
+  readable: string[];
   hidden: string[];
 }): Places {
   const home = canonical(os.homedir());
@@ -323,7 +323,7 @@ export function placesFor(o: {
     home,
     agentHomes: o.agentHomes.map(canonical),
     tools: homeTools(o.path, home),
-    readable: (o.readable ?? []).map(canonical),
+    readable: o.readable.map(canonical),
     hidden: o.hidden,
   };
 }

@@ -112,7 +112,7 @@ export function createApp(options: AppOptions) {
       const { run } = runs.loadRunCached(runId);
       if (run.owner !== owner) fail('NOT_FOUND', 'Unknown run');
       const tree = [run.id];
-      for (let i = 0; i < tree.length; i++) tree.push(...store.children(tree[i]));
+      for (const id of tree) tree.push(...store.children(id)); // the array iterator reaches what each adds
       for (const id of tree) store.finishRun(id, { status: 'cancelled', by: 'host' });
       for (const id of tree) runs.stop(id);
     },
@@ -155,8 +155,9 @@ export function createApp(options: AppOptions) {
             const node = runs.binding(run, tool);
             const adapter = 'adapter' in node.target ? registry.get(node.target.adapter) : undefined;
             if (!adapter || !('send' in adapter)) fail('UNAVAILABLE', 'Outbound adapter unavailable');
+            const verify = adapter.verify?.bind(adapter);
             return {
-              verify: adapter.verify ? (write) => adapter.verify!(run, write) : undefined,
+              ...(verify ? { verify: (write: Write) => verify(run, write) } : {}),
               send: (write, key, sendSignal) => adapter.send(run, write, key, sendSignal),
             };
           },

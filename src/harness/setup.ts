@@ -64,7 +64,7 @@ export function setUp(agent: Agent, found: string, spec: RunSpec, host: Host): S
       scratch,
       agentHomes,
       path: runPath,
-      readable: spec.readable,
+      readable: spec.readable ?? [],
       hidden: PROXIES.filter((name) => process.env[name] !== undefined),
     });
     // Its own user's environment, marked as the host's run, on that PATH; and the one its own errands start in (its

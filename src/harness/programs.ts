@@ -104,17 +104,19 @@ export async function checkProgram(
   const started = program === 'codex' ? codexProgram(file).program : realProgram(file);
   const version = await runForOutput(started, ['--version'], agentEnv({}, { mark: (env) => env }));
   if (!version || !says.test(version)) return { error: `That isn't ${name}: it didn't say so when asked its version.` };
-  return { path: file, version: version.split('\n')[0] };
+  const [firstLine = version] = version.split('\n');
+  return { path: file, version: firstLine };
 }
 
 /** The real program behind a link, or behind a Windows .cmd shim of npm's (its last "%dp0%\..." that isn't node). */
 export function realProgram(file: string): string {
   try {
     if (!isWin || !/\.(cmd|bat)$/i.test(file)) return realpathSync(file);
-    const targets = [...readFileSync(file, 'utf8').matchAll(/"%~?dp0%?\\([^"]+)"/gi)]
-      .map((m) => m[1])
-      .filter((t) => !/(^|\\)node(\.exe)?$/i.test(t));
-    return targets.length ? path.win32.join(path.win32.dirname(file), targets.at(-1)!) : file;
+    const targets = [...readFileSync(file, 'utf8').matchAll(/"%~?dp0%?\\([^"]+)"/gi)].flatMap(([, target]) =>
+      target === undefined || /(^|\\)node(\.exe)?$/i.test(target) ? [] : [target],
+    );
+    const last = targets.at(-1);
+    return last === undefined ? file : path.win32.join(path.win32.dirname(file), last);
   } catch {
     return file;
   }
@@ -143,10 +145,11 @@ export function codexProgram(file: string): { program: string; path: string[] } 
   const root = path.join(vendorOf(real, platform), target);
   const exe = isWin ? 'codex.exe' : 'codex';
   // Its package's layout, then the one before it.
-  for (const [program, helpers] of [
+  const layouts: [program: string, helpers: string][] = [
     [path.join(root, 'bin', exe), path.join(root, 'codex-path')],
     [path.join(root, 'codex', exe), path.join(root, 'path')],
-  ]) {
+  ];
+  for (const [program, helpers] of layouts) {
     if (isFile(program)) return { program, path: realFolder(helpers) ? [helpers] : [] };
   }
   return { program: real, path: [] };

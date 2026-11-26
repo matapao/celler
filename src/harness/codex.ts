@@ -109,8 +109,8 @@ const FEATURE_LINE = /^(\S+)\s+(\S.*?)\s+(true|false)$/;
 function unfitFeatures(listed: string | null): string | null {
   const features = new Map<string, { on: boolean; removed: boolean }>();
   for (const line of (listed ?? '').split('\n')) {
-    const match = FEATURE_LINE.exec(line.trim());
-    if (match) features.set(match[1], { on: match[3] === 'true', removed: match[2] === 'removed' });
+    const [, name, stage, on] = FEATURE_LINE.exec(line.trim()) ?? [];
+    if (name !== undefined) features.set(name, { on: on === 'true', removed: stage === 'removed' });
   }
   if (!features.size) return "couldn't list its features";
   const given: Record<string, boolean> = CODEX_FEATURES;

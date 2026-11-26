@@ -173,7 +173,8 @@ function clearUnsent(db: DatabaseSync) {
   const ids = db.prepare('SELECT id FROM approvals WHERE state IN (SELECT value FROM json_each(?))');
   const content = db.prepare('SELECT args,packet FROM approvals WHERE id=?');
   const clear = db.prepare('UPDATE approvals SET args=?,packet=? WHERE id=?');
-  for (const { id } of ids.all(JSON.stringify(unsentStates))) {
+  for (const unsentRow of ids.all(JSON.stringify(unsentStates))) {
+    const id = String(unsentRow.id);
     const row = content.get(id)!;
     clear.run(cleared(String(row.args)), cleared(String(row.packet)), id);
   }
@@ -199,11 +200,11 @@ function clearCollected(db: DatabaseSync) {
   for (const row of sent.all()) {
     const id = String(row.id);
     const run = String(row.run);
-    const after = sentAt.get(run, id)!.seq;
-    const heard = hearings.all(run, after, row.tool).find((event) => approvalId(run, String(event.key)) === id);
+    const after = Number(sentAt.get(run, id)!.seq);
+    const heard = hearings.all(run, after, String(row.tool)).find((event) => approvalId(run, String(event.key)) === id);
     if (!heard) continue;
     const { result } = answer.get(id)!;
-    collect.run(result === null ? null : cleared(String(result)), heard.at, id);
+    collect.run(result === null ? null : cleared(String(result)), Number(heard.at), id);
   }
 }
 
@@ -218,9 +219,10 @@ function clearApproved(db: DatabaseSync) {
   );
   const answer = db.prepare('SELECT result FROM approvals WHERE id=?');
   const collect = db.prepare('UPDATE approvals SET result=?,collected_at=? WHERE id=?');
-  for (const { id, at } of approved.all()) {
+  for (const row of approved.all()) {
+    const id = String(row.id);
     const { result } = answer.get(id)!;
-    collect.run(result === null ? null : cleared(String(result)), at, id);
+    collect.run(result === null ? null : cleared(String(result)), Number(row.at), id);
   }
 }
 
@@ -229,7 +231,8 @@ function clearOutputs(db: DatabaseSync) {
   const ended = db.prepare("SELECT seq FROM events WHERE kind='ended' AND json_type(detail,'$.output') IS NOT NULL");
   const detail = db.prepare('SELECT detail FROM events WHERE seq=?');
   const clear = db.prepare('UPDATE events SET detail=? WHERE seq=?');
-  for (const { seq } of ended.all()) {
+  for (const row of ended.all()) {
+    const seq = Number(row.seq);
     const { output, ...end } = JSON.parse(String(detail.get(seq)!.detail)) as { output: unknown };
     clear.run(JSON.stringify({ ...end, output: hashed(output) }), seq);
   }

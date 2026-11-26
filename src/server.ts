@@ -47,7 +47,10 @@ function refusal(error: unknown): CallToolResult {
  */
 class TaskWork implements TaskStore {
   readonly work = new Map<string, AbortController>();
-  private kept = new Map<string, { task: Task; result?: Result; sessionId?: string; timer?: NodeJS.Timeout }>();
+  private kept = new Map<
+    string,
+    { task: Task; result?: Result; sessionId: string | undefined; timer?: NodeJS.Timeout }
+  >();
 
   /** A task its session may see: none of another session's. */
   private find(taskId: string, sessionId?: string) {
@@ -117,7 +120,8 @@ class TaskWork implements TaskStore {
       const kept = this.kept.get(id);
       return kept ? [{ ...kept.task }] : [];
     });
-    return start + taskListing.pageSize < ids.length ? { tasks, nextCursor: page.at(-1) } : { tasks };
+    const last = page.at(-1);
+    return start + taskListing.pageSize < ids.length && last !== undefined ? { tasks, nextCursor: last } : { tasks };
   }
 
   /** Every task gone, and its timer with it: its connection has closed. */
@@ -148,6 +152,7 @@ export function createServer(runs: Runs, call: Calls['call'], store: Store, limi
 
   async function connect(run: Run, channel: Transport, native = false) {
     const tasks = new TaskWork();
+    const told = instructions(run);
     const server = new Server(
       { name: 'celler', version: VERSION },
       {
@@ -155,7 +160,7 @@ export function createServer(runs: Runs, call: Calls['call'], store: Store, limi
           tools: { listChanged: true },
           tasks: { list: {}, cancel: {}, requests: { tools: { call: {} } } },
         },
-        instructions: instructions(run),
+        ...(told === undefined ? {} : { instructions: told }),
         taskStore: tasks,
       },
     );

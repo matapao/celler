@@ -41,7 +41,7 @@ export class NotSent extends Error {
   constructor(message = 'The request never reached the service', options?: ErrorOptions & { reason?: string }) {
     super(message, options);
     this.name = 'NotSent';
-    this.reason = options?.reason;
+    if (options?.reason !== undefined) this.reason = options.reason;
   }
 }
 

@@ -126,7 +126,7 @@ function usageOf(u: SDKResultMessage['usage']): TokenUsage {
 /** One run as Claude Code reports it: its reply, its tool calls, what it asks, its cost and model, what was refused. */
 export class Report {
   /** Its calls, by their ids: each tool's name, and the file it writes, for one that writes. */
-  private calls = new Map<string, { name: string; file?: string }>();
+  private calls = new Map<string, { name: string; file: string | undefined }>();
   /** The message it is writing, by the id of the message it streams in. */
   private writing = '';
   private writingIn: string | null = null;
@@ -134,7 +134,7 @@ export class Report {
   private ended?: SDKResultMessage;
   private error?: string;
   /** The error its last message of its own carried, if any: one that ends its turn is the last it writes. */
-  private lastError?: SDKAssistantMessageError;
+  private lastError: SDKAssistantMessageError | undefined;
   private signedOut = false;
   private model?: string;
   /** Its models' names in its own words, by the model each is. */
@@ -277,13 +277,11 @@ export class Report {
   /** Its questions to the person (AskUserQuestion) as a form, each answered with one of its choices, or several. */
   private async question(input: Record<string, unknown>, call: string, signal: AbortSignal): Promise<PermissionResult> {
     const fields = questionFields(input);
+    const [first] = fields;
     const ask = this.t.ask;
-    if (!ask || !fields.length) return { behavior: 'deny', message: UNANSWERED };
+    if (!ask || !first) return { behavior: 'deny', message: UNANSWERED };
     const form = { message: fields.map((f) => f.name).join('\n'), fields };
-    const answer = await ask(
-      { call, tool: 'AskUserQuestion', title: fields[0].name, input, options: [], form },
-      signal,
-    );
+    const answer = await ask({ call, tool: 'AskUserQuestion', title: first.name, input, options: [], form }, signal);
     if (!answer || !('accept' in answer) || !answer.accept)
       return { behavior: 'deny', message: answer ? DECLINED : UNANSWERED };
     // oxlint-disable-next-line typescript/no-base-to-string -- MCP's answers are strings, numbers, booleans or lists: never another object

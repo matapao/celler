@@ -160,15 +160,17 @@ function cycleAmong(left: ReadonlySet<string>, edges: ReadonlyMap<string, string
   }
   const walked: string[] = [];
   let node = [...left][0];
-  while (!walked.includes(node)) {
+  // Every node left has a link from another, so the walk meets a node it passed before it could run out.
+  while (node !== undefined && !walked.includes(node)) {
     walked.push(node);
-    node = linkedFrom.get(node)!;
+    node = linkedFrom.get(node);
   }
-  const cycle = walked.slice(walked.indexOf(node)).reverse();
+  const cycle = walked.slice(node === undefined ? 0 : walked.indexOf(node)).reverse();
   // From its node declared first.
-  const start = cycle.indexOf([...left].find((id) => cycle.includes(id))!);
+  const first = [...left].find((id) => cycle.includes(id));
+  const start = first === undefined ? 0 : cycle.indexOf(first);
   const declared = [...cycle.slice(start), ...cycle.slice(0, start)];
-  return [...declared, declared[0]];
+  return [...declared, ...declared.slice(0, 1)];
 }
 
 /**
@@ -275,9 +277,10 @@ export function compileGraph(config: unknown, schemas: Schemas, publishing?: { a
   // Kahn's topological sort rejects cycles across both exports and delegations.
   const ready = rows.filter((node) => incoming.get(node.id) === 0).map((node) => node.id);
   let visited = 0;
-  for (let i = 0; i < ready.length; i++) {
+  // The array iterator reaches each node pushed while it runs.
+  for (const id of ready) {
     visited++;
-    for (const link of edges.get(ready[i])!) {
+    for (const link of edges.get(id)!) {
       const left = incoming.get(link)! - 1;
       incoming.set(link, left);
       if (left === 0) ready.push(link);
@@ -296,8 +299,7 @@ export function compileGraph(config: unknown, schemas: Schemas, publishing?: { a
     const parents = new Map<string, Set<string>>([[entry, new Set()]]);
     const denied = new Set<string>();
     const todo = [entry];
-    for (let i = 0; i < todo.length; i++) {
-      const parent = todo[i];
+    for (const parent of todo) {
       for (const childId of cell(parent).exports) {
         const seen = parents.get(childId);
         if (seen) {

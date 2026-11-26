@@ -134,7 +134,7 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
 
   // The calls of this process on each approval, each from before it stages or joins it until it ends: woken once a
   // change is saved, and handed its answer as it was kept if its host heard that first, as only its hash is kept then.
-  type Listener = { wake?: () => void; handed?: { receipt: string | null } };
+  type Listener = { wake?: (() => void) | undefined; handed?: { receipt: string | null } };
   const listeners = new Map<string, Set<Listener>>();
   function notify(id: string, handed?: Listener['handed']) {
     for (const listener of listeners.get(id) ?? []) {

@@ -30,7 +30,7 @@ export function createCalls(
     args: Args,
     key: string,
     signal: AbortSignal,
-    o: { heartbeat?: () => void; asTask: boolean; staged: { approval?: string } },
+    o: { heartbeat?: (() => void) | undefined; asTask: boolean; staged: { approval?: string } },
   ): Promise<unknown> {
     const { heartbeat, asTask } = o;
     if ('cell' in node.target) return runs.delegate(run, node.id, node.target.cell, args, key, signal, o);
@@ -73,7 +73,7 @@ export function createCalls(
     args: Args,
     key: string,
     signal: AbortSignal,
-    { heartbeat, asTask = false }: { heartbeat?: () => void; asTask?: boolean } = {},
+    { heartbeat, asTask = false }: { heartbeat?: (() => void) | undefined; asTask?: boolean } = {},
   ): Promise<CallToolResult> {
     signal.throwIfAborted();
     const release = admit(activeCalls, run.id, limits.maxConcurrency, 'Too many concurrent calls in this run');
