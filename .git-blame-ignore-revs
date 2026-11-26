@@ -1,0 +1,4 @@
+# Commits that only reformat, which GitHub's blame view skips, as git blame does with
+# `git config blame.ignoreRevsFile .git-blame-ignore-revs`.
+# Every file as Prettier writes it (pnpm format).
+7c40154a614f4cb82d55be15f1eac84749dd16f1
