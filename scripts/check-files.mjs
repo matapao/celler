@@ -2,7 +2,8 @@
 // - no hand-written file over 500 lines, comments and blank lines included: split it by responsibility. Generated and
 //   vendored files (`linguist-generated`, `linguist-vendored` in .gitattributes), data kept by hand that is not code
 //   (`data`: a catalog, a fixture) and binary files are left out;
-// - README.md (100 lines at most) and AGENTS.md (200) are the repository's only Markdown. Markdown that is the product's
+// - README.md (100 lines at most) and AGENTS.md (200) are the repository's only Markdown, with
+//   .github/SECURITY.md (20) for GitHub's Security tab and Scorecard. Markdown that is the product's
 //   content or a test's data carries the `content` attribute in .gitattributes, with what reads it;
 // - nothing a checkout or an agent leaves behind: editor and system files, merge leftovers, logs, `.env` files;
 // - every suppression says why: `eslint-disable`/`oxlint-disable` with `-- <reason>`, `@ts-expect-error <reason>`
@@ -12,7 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 const LINE_LIMIT = 500;
-const DOC_LIMITS = { 'README.md': 100, 'AGENTS.md': 200 };
+const DOC_LIMITS = { 'README.md': 100, 'AGENTS.md': 200, '.github/SECURITY.md': 20 };
 const LEFTOVERS = [
   /(^|\/)\.DS_Store$/,
   /(^|\/)Thumbs\.db$/,
@@ -60,7 +61,7 @@ for (const file of files) {
     continue;
   }
   if (/\.mdx?$/i.test(file) && !(file in DOC_LIMITS) && !own.has('content')) {
-    problems.push(`${file}: only README.md and AGENTS.md document the repository; fold it into one of them`);
+    problems.push(`${file}: only README.md, AGENTS.md and .github/SECURITY.md document the repository; fold it into one of them`);
   }
   if (own.has('linguist-generated') || own.has('linguist-vendored') || own.has('data')) continue;
   let text;

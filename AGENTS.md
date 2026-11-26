@@ -13,8 +13,8 @@ change it; people who use the library read [README.md](README.md).
 - `pnpm check` must pass before you say a change works. It runs, and lists as passed or failed: `typecheck` (tsc,
   strict, with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`), `lint` (oxlint's type-aware rules in
   `.oxlintrc.json`, which reports unused disable directives, and knip), `format:check` (Prettier; `pnpm format`
-  applies it), `check:files` (500 lines a hand-written file, README.md and AGENTS.md the only Markdown, every
-  suppression with its reason) and `test` (the build, then every test in `test/*.test.mjs` against `dist/`). CI runs
+  applies it), `check:files` (500 lines a hand-written file, README.md, AGENTS.md and `.github/SECURITY.md` the
+  only Markdown, every suppression with its reason) and `test` (the build, then every test in `test/*.test.mjs` against `dist/`). CI runs
   `pnpm check --coverage`: `test:coverage`, which fails below 80% of lines, 70% of branches or 75% of functions.
 - `pnpm check:security` when dependencies, the lockfile, `pnpm-workspace.yaml`, the workflows or anything that
   touches secrets change: the lockfile one YAML document from the registry, hidden characters, licences, secrets in
@@ -37,7 +37,8 @@ change it; people who use the library read [README.md](README.md).
   fixtures. `scripts/`: the checks (`check.mjs`, `check-files.mjs`, `check-security.mjs`) and `github-settings.mjs`
   (the repository's GitHub settings, which the owner runs: `pnpm github:settings`, `--apply` to set them).
   `patches/`: the Codex SDK's patch (pnpm-workspace.yaml says why). `.github/workflows/`: Checks, Security, CodeQL,
-  Scorecard, Dependency review and Publish.
+  Scorecard, Dependency review and Publish; `.github/SECURITY.md`: how to report a vulnerability (GitHub's Security
+  tab shows it).
 - In `src/`, file by file:
   - `app.ts`: `createApp` and its types, what a host calls. `runs.ts`: runs, their grants, lifetimes and delegation.
   - `calls.ts`: a run's calls, through its adapters and the inbox. `server.ts`: a run's MCP server. `catalog.ts`: compiling and checking a graph.
@@ -90,8 +91,8 @@ change it; people who use the library read [README.md](README.md).
 ## Don't
 
 - Push, merge, tag, publish or deploy: those are the person's.
-- Add Markdown besides README.md (100 lines at most) and AGENTS.md (200), a file over 500 lines, or a suppression
-  without its reason (`-- <reason>`, `@ts-expect-error <reason>`).
+- Add Markdown besides README.md (100 lines at most), AGENTS.md (200) and `.github/SECURITY.md` (20), a file over
+  500 lines, or a suppression without its reason (`-- <reason>`, `@ts-expect-error <reason>`).
 - Edit generated files: `dist/` (build it), `pnpm-lock.yaml` (pnpm writes it) or `patches/` (`pnpm patch`), whose
   patch adds the Codex SDK's missing listener and nothing else.
 - Commit `dist/`, put a limit anywhere but `src/limits.ts`, or let a raw host, adapter or database error reach the
