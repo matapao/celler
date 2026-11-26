@@ -185,6 +185,16 @@ export class Report {
       case 'result':
         this.ended = m;
         return;
+      // None of these is what a run tells its host (its session, settings, calls, reply and end): its sign-in's own
+      // progress, a conversation it starts over, a next prompt it suggests, its rate limits as they change, a tool's
+      // time so far and its own summary of the tools it used. Each by name, so one a newer SDK adds is decided on here.
+      case 'auth_status':
+      case 'conversation_reset':
+      case 'prompt_suggestion':
+      case 'rate_limit_event':
+      case 'tool_progress':
+      case 'tool_use_summary':
+        return;
     }
   }
 

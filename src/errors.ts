@@ -57,6 +57,15 @@ export function reasonOf(error: NotSent, maxChars: number): string | undefined {
   return error.reason.replace(BREAKS, ' ').trim().slice(0, maxChars).trimEnd() || undefined;
 }
 
+/**
+ * A promise rejected with what `signal` aborted with, as it is: the reason its owner gave (an Error from `abort()` or
+ * `AbortSignal.timeout`, or whatever a host passed) passes on unchanged, as the platform's own APIs pass it. Only for a
+ * signal that has aborted.
+ */
+export function abortedWith(signal: AbortSignal): Promise<never> {
+  return new Promise<never>(() => signal.throwIfAborted());
+}
+
 export function fail(code: ErrorCode, message: string, node?: string): never {
   throw new CellerError(code, message, node);
 }

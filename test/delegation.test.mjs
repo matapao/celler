@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import test from 'node:test';
 import { createApp } from 'celler';
 import { cell, memoryDatabase, object, refused, request, text, tool, until, withClient } from './support.mjs';
@@ -12,8 +13,7 @@ test('a delegation retry joins its running child, the tree has a run cap, and en
   const childGate = new Promise((resolve) => {
     releaseChild = resolve;
   });
-  const untilAborted = (signal) =>
-    new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason)));
+  const untilAborted = (signal) => once(signal, 'abort').then(() => signal.throwIfAborted());
   const work = (client, task, timeout = 5000) =>
     client.callTool({ name: 'invoke', arguments: { name: 'work', arguments: { task } } }, undefined, { timeout });
   const platform = {

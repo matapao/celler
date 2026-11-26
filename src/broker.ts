@@ -5,7 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolResultSchema, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { Adapter, Platform } from './app.js';
 import type { NodeConfig } from './catalog.js';
-import { fail, CellerError } from './errors.js';
+import { abortedWith, fail, CellerError } from './errors.js';
 import { brokerLimits, withLimits } from './limits.js';
 
 export type BrokerCommand = {
@@ -140,7 +140,7 @@ function createSemaphore(limit: number) {
         active++;
         return;
       }
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((resolve) => {
         const grant = () => {
           signal.removeEventListener('abort', onAbort);
           active++;
@@ -149,7 +149,7 @@ function createSemaphore(limit: number) {
         const onAbort = () => {
           const index = queue.indexOf(grant);
           if (index >= 0) queue.splice(index, 1);
-          reject(signal.reason);
+          resolve(abortedWith(signal));
         };
         queue.push(grant);
         signal.addEventListener('abort', onAbort, { once: true });

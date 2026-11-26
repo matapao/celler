@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import test from 'node:test';
 import net from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -134,10 +135,7 @@ test("a call still going when its run ends hears that it was cut off: the run's 
     };
     // A call that lasts until the run that made it ends.
     const wait = {
-      call: (_run, _args, signal) =>
-        new Promise((_resolve, reject) =>
-          signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
-        ),
+      call: (_run, _args, signal) => once(signal, 'abort').then(() => signal.throwIfAborted()),
     };
     const { platform, app } = oneCell(() => leaving, {}, new Map([['wait', wait]]));
     const revision = app.publish([

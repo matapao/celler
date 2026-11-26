@@ -243,6 +243,9 @@ class Report {
       case 'error':
         this.said = e.message;
         return;
+      // A turn begun says nothing its first item doesn't.
+      case 'turn.started':
+        return;
     }
   }
 
@@ -268,6 +271,12 @@ class Report {
         return this.tool(item.id, 'websearch', `websearch "${item.query.slice(0, L.searchChars)}"`);
       case 'file_change':
         if (completed) this.changed(item);
+        return;
+      // Its reasoning and its to-do list are its own, not its reply; an error it goes on after isn't the run's, which
+      // a failed turn says.
+      case 'reasoning':
+      case 'todo_list':
+      case 'error':
         return;
     }
   }

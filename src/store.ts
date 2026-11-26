@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { fail, NotSent, reasonOf } from './errors.js';
+import { abortedWith, fail, NotSent, reasonOf } from './errors.js';
 import { canonicalJson, hash, normalizeJson } from './json.js';
 import type { appLimits } from './limits.js';
 import {
@@ -65,20 +65,16 @@ export function freezeRun(run: Run): Run {
 
 /** Settles like `promise`, or rejects as soon as `signal` aborts. */
 export function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
+  if (signal.aborted) return abortedWith(signal);
+  return new Promise<T>((resolve) => {
+    const onAbort = () => resolve(abortedWith(signal));
     signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort);
-        resolve(value);
-      },
-      (err) => {
-        signal.removeEventListener('abort', onAbort);
-        reject(err);
-      },
-    );
+    const settled = (outcome: T | Promise<T>) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(outcome);
+    };
+    // Its value as it is, and its rejection as its own: the promise itself, rejected.
+    promise.then(settled, () => settled(promise));
   });
 }
 
@@ -340,10 +336,10 @@ export function openStore(db: DatabaseSync, limits: typeof appLimits) {
         fail('DELIVERY_FAILED', 'Delivery failed' + reason);
       }
 
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((resolve) => {
         const onAbort = () => {
           listener.wake = undefined;
-          reject(signal.reason);
+          resolve(abortedWith(signal));
         };
         listener.wake = () => {
           listener.wake = undefined;
