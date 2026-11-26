@@ -20,6 +20,11 @@ on:
     - cron: '17 5 * * *' # daily: new advisories arrive without a push
 permissions:
   contents: read
+# A newer run for the same event and branch stops the one before it; the daily live run and a push's are apart. The
+# group is named, not github.workflow, which is publish.yml's own when it calls this one.
+concurrency:
+  group: security-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   security:

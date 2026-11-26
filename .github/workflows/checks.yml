@@ -13,6 +13,11 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# A newer push to the same branch or pull request stops the run before it. The group is named, not github.workflow,
+# which is publish.yml's own when it calls this one.
+concurrency:
+  group: checks-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:

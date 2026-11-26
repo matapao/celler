@@ -11,6 +11,10 @@ on:
     tags: ['v*']
 permissions:
   contents: read
+# One release of a tag at a time, never stopped once it has begun.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   checks:
@@ -28,7 +32,7 @@ jobs:
     permissions:
       contents: write # the release and its assets
       id-token: write # the attestation's signing identity
-      attestations: write
+      attestations: write # the attestation itself
     outputs:
       tarball: ${{ steps.pack.outputs.tarball }}
     steps:
