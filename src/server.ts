@@ -20,7 +20,7 @@ import type { Run, Store } from './store.js';
  * This library's own version, which a client sees as the server's: its package's, as a test holds it. Written here,
  * not read from its package's file, which a host that bundles it doesn't have beside it.
  */
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 
 /** The client's own key for a call, if it gave one: a malformed one is its mistake, answered as a protocol error. */
 function callIdOf(meta: Record<string, unknown> | undefined, maxChars: number): string | undefined {
