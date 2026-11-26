@@ -1,0 +1,14 @@
+# Text is stored with LF everywhere, whatever the checkout's system.
+* text=auto eol=lf
+
+# Generated: GitHub folds these in pull requests and leaves them out of the language bar, and scripts/check-files.mjs
+# leaves them out of the line limit.
+pnpm-lock.yaml linguist-generated=true -diff
+
+# Markdown that is the product's content or a test's data, not the repository's documentation: scripts/check-files.mjs
+# allows only README.md and AGENTS.md besides these. One line per path, with what reads it. (celler has none.)
+# path/to/guide.md content
+
+# Data kept by hand that is not code (a catalog, a fixture): no line limit. One line per path, with what it is.
+# (celler has none.)
+# path/to/catalog.json data

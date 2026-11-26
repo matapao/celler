@@ -20,6 +20,10 @@ strictDepBuilds: true
 allowBuilds:
   # Its script only checks the program its own platform's package brings, which it runs from there as it is.
   esbuild: false
+# pnpm 12 otherwise writes the lockfile as two YAML documents, pnpm's own first, and GitHub's dependency graph,
+# Dependabot alerts and OSV-Scanner then read only pnpm (tested: 16 packages of 304). pnpm still switches to
+# packageManager's version, and engines.pnpm stops pnpm 11. The lockfile stays one document: check:security holds it.
+pmOnFail: ignore
 
 # The agent SDKs' bundled copies of Claude Code and Codex: celler runs the person's own (harness/programs.ts), so none is
 # installed.

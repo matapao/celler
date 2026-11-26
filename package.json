@@ -8,9 +8,10 @@
     "url": "git+https://github.com/matapao/celler.git"
   },
   "type": "module",
-  "packageManager": "pnpm@11.28.9+sha512.35421cea2720eca3f5ad722b67e8ef18f4d3cd4745ed2fcfeb0dc288d4e9437fad3870d91ee6e83f268f0f6f7e0f62723317b19617bb45ee4333172ef51159f8",
+  "packageManager": "pnpm@12.22.0+sha512.894940a3d9a57dfa6fd373990fb4e41e09c2f2d76d982ed1d75275d39267f988fb4e2d40900cbe9921c68d97c67aa1a1096d276633db248f7b34927ac9ddb7a4",
   "engines": {
-    "node": ">=24.11.0"
+    "node": ">=24.11.0",
+    "pnpm": ">=12.22.0 <13"
   },
   "exports": {
     ".": {
@@ -28,14 +29,17 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "pnpm run build && oxlint --type-aware --deny-warnings --report-unused-disable-directives src test scripts && knip",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "pnpm run build && node --test test/*.test.mjs",
     "test:coverage": "pnpm run build && node --test --experimental-test-coverage --test-coverage-include='dist/**' test/*.test.mjs",
-    "lint": "pnpm run build && oxlint --type-aware --deny-warnings src test scripts && knip",
-    "lint:style": "oxlint --type-aware -D no-nested-ternary -D typescript/no-explicit-any src test scripts && prettier --check .",
-    "format": "prettier --write .",
-    "check:lines": "node scripts/check-lines.mjs",
+    "check:files": "node scripts/check-files.mjs",
     "check:security": "node scripts/check-security.mjs",
-    "check:package": "pnpm run build && publint --strict && attw --pack . --profile esm-only"
+    "check:package": "pnpm run build && publint --strict && attw --pack . --profile esm-only",
+    "github:settings": "node scripts/github-settings.mjs",
+    "check": "node scripts/check.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.330",
