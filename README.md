@@ -1,8 +1,11 @@
 # celler
 
-Gives an agent harness a published graph of cells and tools over MCP, with grants, delegation, an audit log and a human approval inbox for everything that leaves the host. A service or Electron main process owns the library, the SQLite database and the adapters.
+[![Checks](https://github.com/matapao/celler/actions/workflows/checks.yml/badge.svg)](https://github.com/matapao/celler/actions/workflows/checks.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/matapao/celler/badge)](https://scorecard.dev/viewer/?uri=github.com/matapao/celler)
 
-## Install
+Gives an agent harness a published graph of cells and tools over MCP, with grants, delegation, an audit log and a human approval inbox for everything that leaves the host. A service or Electron main process owns the library, the SQLite database and the adapters: an agent reaches only what its run was granted, each of its calls is checked and logged, and what the host puts behind `prepare` and `send` leaves only as the packet a person approved.
+
+## Setup
 
 ```sh
 pnpm add celler   # Node.js 24.11+
@@ -25,7 +28,7 @@ const revision = app.publish([
 await app.start({ owner, revision, entry: 'review', workspace, input: 'Summarize the notes.' });
 ```
 
-## Concepts
+### Concepts
 
 - **Cell**: a role with a launch `profile`, `context` and `exports`. Without a profile it only groups nodes.
 - **Tool**: an MCP definition bound to an `{ adapter }` (host code) or a `{ cell }` (a child run that lives as long as its caller's run, and answers in text, so it declares no `outputSchema`). Its name is its node ID.
@@ -36,7 +39,7 @@ await app.start({ owner, revision, entry: 'review', workspace, input: 'Summarize
 - **Calls**: failures return `isError` results the model can read; raw host errors never reach it. A retry with the same `celler/call-id` joins the same approval or child run; without one, the same tool and arguments join an approval while it is open, or until a call has heard what it came to: the same call made again after that is made again. Task-capable clients can run any call as an MCP task and cancel it.
 - **Harnesses** (`celler/harness`): the person's own Claude Code and Codex, each through its own SDK and at least the version that SDK is made with, with their sign-in and health, and a simulated one. `login({ elsewhere: true })` is for a person whose browser is on another device, as for a computer with no screen: Codex's then shows a link and a one-time code (`userCode`). At `work` an agent uses its own tools in the run's folder, its commands in its own sandbox at its strictest on macOS, Linux and Windows, as one settings file per agent per system says (`src/harness/sandbox/`): no network, nothing written outside the folder or in its settings for the agents celler runs (the run's scratch and temporary files are its own: in `.celler/`, and Claude Code's shell's in a short folder of the run's), nothing read of the person's home, the host's data, the environment or the system's temporary folders, each closed as a whole. Everything outside goes through the run's MCP tools. Neither agent starts helpers of its own beyond Claude Code's listed `Agent` tool, nor reads a folder's `AGENTS.md`: Codex's are off. Codex runs only with its features as celler decides them (`src/harness/sandbox/codex-features.ts`): one a newer Codex turns on stops its runs, and its health says so, until celler is made for it. `purpose: "read"` leaves the folder as it was: Claude Code gets no commands, and Codex's write only in the run's scratch, gone after it; `"inference"` has no tools, but for what Codex's model comes with: its patch tool, which writes only in that scratch, and its clock. `harnessPlatform({ runtime, spec, server })` is a `Platform` that runs each cell's agent (`new AgentRuntime(claudeAgent(…) or codexAgent(…), host)`) with the run's MCP server at a local address; its progress (a call to an MCP tool with its server and tool, as `mcp`), its own asks (Claude Code's with its reason, as `reason`) and what it ended with (a stopped run's too, and why, as `ended`, where its clock or its agent's SDK says) go to the host. Its `close()` stops the agents still going and settles once what they left is gone: their runs end failed, not cancelled, so what they left for a person can still be approved. A host's own `Runtime` makes its results with `emptyUsage()` and `failure(error)`. Each agent keeps a session's transcript, every prompt and tool result, which resuming it needs, and more by the session's id: once the session's work is done, `removeSession({ cwd, sessionId })` on the `AgentRuntime` that ran it removes all of it, Codex's by Codex's own deletion, and that session's alone, never through a link.
 
-## Host contract
+### Host contract
 
 - Authenticate owners. Keep the database and `app.human` outside the harness workspace. One service per database.
 - The broker confines the harness and enforces the workspace boundary: JSON on stdin/stdout, and MCP on fd 3 in `launch` mode.
@@ -46,4 +49,18 @@ await app.start({ owner, revision, entry: 'review', workspace, input: 'Summarize
 - After a crash, `unknown` deliveries wait for `human.reconcile(owner, id, "sent" | "failed", result?)`: a sent one's result passes its tool's checks, as a delivery's own answer does. Resume a run with `app.reconnect`; `app.end` ends it and everything it delegated.
 - Limits and their defaults are in `src/limits.ts`. Override any of the app's, the broker's or a connector's by name in its options. The harness's, and how deep JSON may nest, are module constants.
 
-Changing the code? Read [AGENTS.md](AGENTS.md) first. `pnpm test` must pass.
+## Develop
+
+```sh
+pnpm install --frozen-lockfile && pnpm check
+```
+
+[AGENTS.md](AGENTS.md) has the rest: what `pnpm check` runs, the layout, the rules and how a release is made.
+
+## Security
+
+Report a vulnerability privately, with GitHub's "Report a vulnerability" on this repository's Security tab. celler is a hobby project kept in spare time: a report is looked at on a best-effort basis, when time allows. Check a release's tarball with `gh attestation verify <tarball> --repo matapao/celler`.
+
+## License
+
+MIT: [LICENSE](LICENSE).
