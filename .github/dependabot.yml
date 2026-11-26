@@ -1,22 +1,33 @@
-# Keeps celler's dependencies at their latest stable versions, the agent SDKs among them. A pull request that updates
-# an agent SDK also sets agentVersions in src/limits.ts to the version of the agent it is made with (AGENTS.md); its
-# test says so until it does.
-# Each update waits a week after its release, the agent SDKs' too: the same wait as pnpm's minimumReleaseAge
-# (pnpm-workspace.yaml). Security updates come at once.
 version: 2
+# The same plan in every repository: weekly, grouped per ecosystem, and a week behind each release, the wait pnpm's
+# minimumReleaseAge keeps too (pnpm-workspace.yaml). Security updates come at once. One entry per ecosystem this
+# repository has (npm per folder with a lockfile, gomod per go.mod, docker per Dockerfile folder, gitsubmodule), and
+# github-actions always.
 updates:
-  - package-ecosystem: npm
+  - package-ecosystem: npm # pnpm's lockfile
     directory: /
     schedule:
-      interval: daily
+      interval: weekly
+      day: monday
     cooldown:
       default-days: 7
+    open-pull-requests-limit: 5
     groups:
+      # celler's own: the agent SDKs come together, every update of theirs, and a pull request that updates one also
+      # sets agentVersions in src/limits.ts to the version of the agent it is made with (AGENTS.md); its test says so
+      # until it does.
       agent-sdks:
         patterns: ['@anthropic-ai/claude-agent-sdk', '@openai/codex-sdk']
+      npm:
+        patterns: ['*']
+        update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+      day: monday
     cooldown:
       default-days: 7
+    groups:
+      actions:
+        patterns: ['*']

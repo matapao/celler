@@ -1,9 +1,11 @@
 name: Publish
-# A version tag (v0.2.0) releases that version once Test and Security have passed. Those run with read access only;
-# the one job that can write runs no tests and installs only what the lockfile names. It builds and packs the package
-# once, attests that tarball (GitHub artifact attestations), and attaches it with its SBOM to the tag's GitHub release.
-# That file, as it is, is what goes to npm as `celler` (AGENTS.md, Releasing).
-# Consumers verify with: gh attestation verify <tarball> --repo matapao/celler
+# A version tag (v0.8.0) releases that version once Checks and Security have passed. Those run with read access only;
+# the jobs that can write run no tests and install only what the lockfile names. `release` builds and packs the package
+# once, attests that tarball (GitHub artifact attestations), and attaches it to the tag's GitHub release with its
+# attestation (<tgz>.sigstore.json, the Sigstore bundle, and <tgz>.intoto.jsonl, its DSSE envelope on one line) and its
+# SBOM (<tgz>.cdx.json). `npm`, once the owner approves it in the `npm` environment, publishes that release's own
+# tarball to npm as `celler` by trusted publishing (OIDC: no token), after checking its attestation (AGENTS.md,
+# Releasing). Consumers verify with: gh attestation verify <tarball> --repo matapao/celler
 on:
   push:
     tags: ['v*']
@@ -11,31 +13,33 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    uses: ./.github/workflows/test.yml
+  checks:
+    uses: ./.github/workflows/checks.yml
   security:
     uses: ./.github/workflows/security.yml
     with:
       live: true
 
-  publish:
+  release:
     name: Release celler
-    needs: [test, security]
+    needs: [checks, security]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: write # the release and its assets
       id-token: write # the attestation's signing identity
       attestations: write
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '24.22.3'
+          node-version-file: .nvmrc
           package-manager-cache: false # nothing cached may reach what is published
-      - run: corepack enable pnpm
       - name: The tag names the version in package.json
         run: |
           version="v$(node -p "require('./package.json').version")"
@@ -45,17 +49,71 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # dist/ is built, never committed: the tarball holds the build of the tagged commit.
       - name: Build and pack once, and its SBOM
+        id: pack
         run: |
           pnpm run build
           mkdir release
           pnpm pack --pack-destination release
-          pnpm sbom --sbom-format cyclonedx --prod --out release/sbom.cdx.json
+          tarball="$(basename release/*.tgz)"
+          pnpm sbom --sbom-format cyclonedx --prod --out "release/$tarball.cdx.json"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest
         with:
           subject-path: release/*.tgz
-      - name: The release, with the tarball and its SBOM
+      - name: The attestation as release assets
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          cp "$BUNDLE" "release/$TARBALL.sigstore.json"
+          jq -c '.dsseEnvelope' "$BUNDLE" > "release/$TARBALL.intoto.jsonl"
+      - name: The release, with the tarball, its attestation and its SBOM
         env:
           GH_TOKEN: ${{ github.token }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
         run: |
-          gh release create "$GITHUB_REF_NAME" release/*.tgz release/sbom.cdx.json --verify-tag --title "$GITHUB_REF_NAME" \
-            --notes "celler $GITHUB_REF_NAME. Verify the tarball with: gh attestation verify <tarball> --repo $GITHUB_REPOSITORY"
+          gh release create "$GITHUB_REF_NAME" "release/$TARBALL" "release/$TARBALL.sigstore.json" \
+            "release/$TARBALL.intoto.jsonl" "release/$TARBALL.cdx.json" --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes "celler $GITHUB_REF_NAME. Verify the tarball with: gh attestation verify $TARBALL --repo $GITHUB_REPOSITORY"
+
+  npm:
+    name: Publish to npm
+    needs: [release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The owner approves each publish here (AGENTS.md, Releasing); npm trusts only this workflow in this environment.
+    environment: npm
+    permissions:
+      contents: read # the release's tarball
+      attestations: read # its attestation, to verify it
+      id-token: write # trusted publishing: npm takes this run's OIDC token in place of a token of its own
+    steps:
+      # Only .nvmrc, for Node's version: what is published is the release's tarball, not this checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .nvmrc
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: npm can publish by trusted publishing (11.5.1 or later)
+        run: |
+          npm_version="$(npm --version)"
+          if [ "$(printf '%s\n' 11.5.1 "$npm_version" | sort -V | head -n 1)" != 11.5.1 ]; then
+            echo "npm $npm_version can't publish by trusted publishing: it needs 11.5.1 or later"; exit 1
+          fi
+      - name: The release's own tarball, as attested
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARBALL: ${{ needs.release.outputs.tarball }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$TARBALL" --dir release
+          gh attestation verify "release/$TARBALL" --repo "$GITHUB_REPOSITORY"
+      - name: Publish it to npm
+        env:
+          TARBALL: ${{ needs.release.outputs.tarball }}
+        run: npm publish "release/$TARBALL"

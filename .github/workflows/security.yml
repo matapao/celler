@@ -4,6 +4,7 @@ name: Security
 on:
   push:
   pull_request:
+  merge_group:
   workflow_dispatch:
     inputs:
       live:
@@ -22,9 +23,10 @@ permissions:
 
 jobs:
   security:
-    # Required on every push and pull request. The live checks (daily, by hand, and before a release) tell and decide
-    # nothing: Semgrep's registry rules among them still meet src/preview.ts's non-literal RegExp.
-    name: Security checks
+    # Required on every push and pull request (the check main requires is named Security). The live checks (daily, by
+    # hand, and before a release) tell and decide nothing: Semgrep's registry rules among them still meet
+    # src/preview.ts's non-literal RegExp.
+    name: Security
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     continue-on-error: ${{ github.event_name == 'schedule' || inputs.live == true }}
@@ -33,10 +35,11 @@ jobs:
         with:
           fetch-depth: 0 # every commit, for the secrets scan
           persist-credentials: false
+      # pnpm at the version packageManager in package.json names.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '24.22.3'
-      - run: corepack enable pnpm
+          node-version-file: .nvmrc
       # pnpm audit signatures and the licence check read the installed packages.
       - run: pnpm install --frozen-lockfile
 
