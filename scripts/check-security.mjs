@@ -67,15 +67,16 @@ const live = process.argv.includes('--live');
 const installed = (tool) =>
   spawnSync(process.platform === 'win32' ? 'where' : 'which', [tool], { stdio: 'ignore' }).status === 0;
 const run = (cmd, args, cwd = root) => spawnSync(cmd, args, { cwd, stdio: 'inherit' }).status === 0;
-// pnpm is a .cmd on Windows, which starts only through a shell: its own script runs on this Node instead.
-const pnpm = (args) =>
-  process.env.npm_execpath ? run(process.execPath, [process.env.npm_execpath, ...args]) : run('pnpm', args);
-const pnpmOut = (args) =>
-  spawnSync(
-    process.env.npm_execpath ? process.execPath : 'pnpm',
-    process.env.npm_execpath ? [process.env.npm_execpath, ...args] : args,
-    { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
-  );
+// The pnpm that runs this script, as it runs: pnpm 12's own program is native, an older pnpm's a script for this Node
+// (on Windows too, where its command is a .cmd that starts only through a shell); by name when none ran it.
+function pnpmCommand(args) {
+  const own = process.env.npm_execpath;
+  if (!own) return ['pnpm', args];
+  if (/\.[cm]?js$/.test(own)) return [process.execPath, [own, ...args]];
+  return [own, args];
+}
+const pnpm = (args) => run(...pnpmCommand(args));
+const pnpmOut = (args) => spawnSync(...pnpmCommand(args), { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
 
 // Characters that change what a line shows, or show nothing: every format character (bidirectional controls, zero
 // widths, the tag characters a hidden message is written in) and every default-ignorable one (variation selectors,

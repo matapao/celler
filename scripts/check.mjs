@@ -10,10 +10,14 @@ const STEPS = ['typecheck', 'lint', 'format:check', 'check:files', 'check:go', '
 const { scripts = {} } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const coverage = process.argv.includes('--coverage');
 const steps = STEPS.map((step) => (step === 'test' && coverage && scripts['test:coverage'] ? 'test:coverage' : step));
-const pnpm = (args) =>
-  process.env.npm_execpath
-    ? spawnSync(process.execPath, [process.env.npm_execpath, ...args], { stdio: 'inherit' })
+// pnpm 12 is a program of its own (npm_execpath names it); an earlier pnpm is a script for this Node to run.
+const exec = process.env.npm_execpath;
+const pnpm = (args) => {
+  if (exec && !/\.[cm]?js$/.test(exec)) return spawnSync(exec, args, { stdio: 'inherit' });
+  return exec
+    ? spawnSync(process.execPath, [exec, ...args], { stdio: 'inherit' })
     : spawnSync('pnpm', args, { stdio: 'inherit', shell: process.platform === 'win32' });
+};
 
 const results = [];
 for (const step of steps.filter((name) => scripts[name])) {
