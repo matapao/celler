@@ -3,7 +3,7 @@ import test from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { createApp, isHashed, NotSent } from '@matapao/celler';
+import { createApp, isHashed, NotSent } from 'celler';
 import { hash } from '../dist/json.js';
 import { cell, memoryDatabase, refused, request, text, tool, until, withClient } from './support.mjs';
 import { graph, packet, pending, use } from './support-approval.mjs';

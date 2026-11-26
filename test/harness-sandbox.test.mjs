@@ -3,7 +3,7 @@ import test from 'node:test';
 import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { AgentRuntime } from '@matapao/celler/harness';
+import { AgentRuntime } from 'celler/harness';
 import { claudeOnLinux } from '../dist/harness/sandbox/claude.linux.js';
 import { claudeOnMacos } from '../dist/harness/sandbox/claude.macos.js';
 import { claudeOnWindows } from '../dist/harness/sandbox/claude.windows.js';
@@ -288,6 +288,8 @@ test("each harness's settings for each system keep its commands to the folder an
       // its features are every system's, and celler lets none other be on but those it has decided on.
       assert.deepEqual([own.approval_policy, own.web_search], ['never', 'disabled'], at);
       assert.deepEqual(own.skills, { bundled: { enabled: false } }, at);
+      // No helpers of its own, and no folder's AGENTS.md as its instructions.
+      assert.deepEqual([own.agents, own.project_doc_max_bytes], [{ enabled: false }, 0], at);
       assert.equal(own.features, CODEX_FEATURES, at);
       for (const feature of [
         'view_image',
@@ -301,6 +303,8 @@ test("each harness's settings for each system keep its commands to the folder an
         'goals',
         'image_generation',
         'skill_mcp_dependency_install',
+        'multi_agent',
+        'multi_agent_v2',
       ]) {
         assert.equal(own.features[feature], false, `${at}: ${feature}`);
       }

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createApp } from '@matapao/celler';
+import { createApp } from 'celler';
 import { hash } from '../dist/json.js';
 import { cell, memoryDatabase, object, refused, request, text, tool, until, withClient } from './support.mjs';
 import { graph, packet, pending, use } from './support-approval.mjs';

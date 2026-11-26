@@ -1,5 +1,5 @@
 {
-  "name": "@matapao/celler",
+  "name": "celler",
   "version": "0.6.0",
   "description": "An MCP gateway for agent harnesses: a published graph of cells and tools, with grants, delegation, an audit log and an approval inbox for everything that leaves the host",
   "license": "MIT",
@@ -48,6 +48,7 @@
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
     "@types/node": "^24.19.2",
+    "esbuild": "0.28.2",
     "knip": "6.45.1",
     "oxlint": "1.94.0",
     "oxlint-tsgolint": "7.0.2007",
@@ -60,6 +61,6 @@
     "src"
   ],
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "registry": "https://registry.npmjs.org/"
   }
 }

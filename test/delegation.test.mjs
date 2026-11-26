@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createApp } from '@matapao/celler';
+import { createApp } from 'celler';
 import { cell, memoryDatabase, object, refused, request, text, tool, until, withClient } from './support.mjs';
 
 test('a delegation retry joins its running child, the tree has a run cap, and ending a run stops the tree', async (t) => {

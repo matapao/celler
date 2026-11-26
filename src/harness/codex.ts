@@ -36,11 +36,11 @@ const PICTURES = /^image\/(png|jpeg|gif|webp)$/i;
 /** What it says when it isn't signed in itself for the host. */
 const SIGN_IN_RE = /\b401\b|unauthori[sz]ed|not logged in|codex login/i;
 /**
- * A model-only decision's own settings: no command, no helper, no question to the person and no sleep. Its model comes
- * with two tools no setting takes away: its patch tool, which writes only in the run's scratch there, and its clock.
+ * A model-only decision's own settings: no command, no question to the person and no sleep, and as every run, no
+ * helper. Its model comes with two tools no setting takes away: its patch tool, which writes only in the run's scratch
+ * there, and its clock.
  */
 const MODEL_ONLY = {
-  agents: { enabled: false },
   tools: { experimental_request_user_input: { enabled: false } },
   features: { ...CODEX_FEATURES, shell_tool: false, sleep_tool: false },
 };

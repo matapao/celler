@@ -22,6 +22,9 @@ export const CODEX_FEATURES = {
   image_generation: false,
   // MCP servers a skill needs, installed.
   skill_mcp_dependency_install: false,
+  // Helpers of its own, either kind: the newer one's would win over `agents.enabled`, which every system's turns off.
+  multi_agent: false,
+  multi_agent_v2: false,
 };
 
 /** Those it may have on as it has them. */
@@ -39,8 +42,6 @@ export const CODEX_FEATURES_ON: ReadonlySet<string> = new Set([
   'code_mode_host_output_truncation',
   'code_mode_interrupt',
   'instant_interrupt',
-  // Its helpers, each with its tools; a model-only decision has none (codex.ts).
-  'multi_agent',
   // How it lists its tools to its model.
   'incremental_tools',
   'incremental_tools_legacy',

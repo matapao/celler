@@ -3,7 +3,7 @@ import test from 'node:test';
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { AgentRuntime } from '@matapao/celler/harness';
+import { AgentRuntime } from 'celler/harness';
 import { CODEX_HOME_CONFIG } from '../dist/harness/agents.js';
 import { harnessLimits } from '../dist/limits.js';
 import { claudeOnMacos } from '../dist/harness/sandbox/claude.macos.js';

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createApp, NotSent } from '@matapao/celler';
+import { createApp, NotSent } from 'celler';
 import { cell, memoryDatabase, object, refused, request, text, tool, until, withClient } from './support.mjs';
 import { graph, packet, pending, use } from './support-approval.mjs';
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createApp, createBroker } from '@matapao/celler';
+import { createApp, createBroker } from 'celler';
 import { cell, memoryDatabase, request, text, withClient } from './support.mjs';
 
 test('a host broker receives the workspace and can use MCP over its own pipe', async (t) => {

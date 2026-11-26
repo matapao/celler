@@ -1,6 +1,6 @@
 // What a host writes to tell a review with its packet from one with its hash alone, through the package's own name and
 // types: type-checked by records.test.mjs, never run.
-import { isHashed, type ApprovalReview, type HashedReview, type PacketReview, type Write } from '@matapao/celler';
+import { isHashed, type ApprovalReview, type HashedReview, type PacketReview, type Write } from 'celler';
 
 export function described(review: ApprovalReview): string {
   // @ts-expect-error: only a review of what never went says when that was

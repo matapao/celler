@@ -1,5 +1,4 @@
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import {
   isTerminal,
   type CreateTaskOptions,
@@ -17,8 +16,11 @@ import { taskListing, type appLimits } from './limits.js';
 import type { Runs } from './runs.js';
 import type { Run, Store } from './store.js';
 
-/** This library's own version, as its package says it, which a client sees as the server's. */
-const VERSION: string = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+/**
+ * This library's own version, which a client sees as the server's: its package's, as a test holds it. Written here,
+ * not read from its package's file, which a host that bundles it doesn't have beside it.
+ */
+const VERSION = '0.6.0';
 
 /** The client's own key for a call, if it gave one: a malformed one is its mistake, answered as a protocol error. */
 function callIdOf(meta: Record<string, unknown> | undefined, maxChars: number): string | undefined {

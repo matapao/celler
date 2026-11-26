@@ -3,7 +3,7 @@ import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
-import { createApp, NotSent } from '@matapao/celler';
+import { createApp, NotSent } from 'celler';
 import { appLimits } from '../dist/limits.js';
 import { callThenClose, cell, memoryDatabase, request, text, tool, until, withClient } from './support.mjs';
 import { graph, packet, pending, use } from './support-approval.mjs';

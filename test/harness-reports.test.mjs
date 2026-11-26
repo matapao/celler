@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { AgentRuntime, checkProgram, tierModel } from '@matapao/celler/harness';
+import { AgentRuntime, checkProgram, tierModel } from 'celler/harness';
 import { harnessLimits } from '../dist/limits.js';
 import {
   claudeWords,

@@ -12,8 +12,8 @@
 //   folders and what the host adds; nor Codex's own home (CODEX_HOME), its settings and sign-in, wherever it is;
 // - their environment is Codex's core variables and the run's own home and temporary folders;
 // - no web search, no image read from anywhere on the computer, no plugins, hooks or memories, no skills it comes with,
-//   no goals it keeps after its turn and no pictures made; and no feature on that celler hasn't decided on
-//   (codex-features.ts).
+//   no goals it keeps after its turn and no pictures made; no helpers of its own, and no folder's AGENTS.md read as
+//   its instructions; and no feature on that celler hasn't decided on (codex-features.ts).
 
 import path from 'node:path';
 import { CODEX_FEATURES } from './codex-features.js';
@@ -73,6 +73,11 @@ export function codexOnLinux(p: Places, purpose: 'work' | 'read') {
     },
     // None of the skills Codex comes with: what celler's tools don't do, a run can't either.
     skills: { bundled: { enabled: false } },
+    // No helpers of its own: a run asks another only through a tool bound to a cell.
+    agents: { enabled: false },
+    // No folder's AGENTS.md (or what stands in for it) as its instructions: a run's are its cells' own, as Claude
+    // Code's are, which reads none.
+    project_doc_max_bytes: 0,
     features: CODEX_FEATURES,
   };
 }

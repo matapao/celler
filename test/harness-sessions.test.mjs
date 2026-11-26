@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
-import { AgentRuntime, codexAgent } from '@matapao/celler/harness';
+import { AgentRuntime, codexAgent } from 'celler/harness';
 import { codexWords, fakeClaude, fakeCodex, host, inFolder, sentTo } from './support-harness.mjs';
 
 // All an agent keeps of a session removed once its work is done, in agents' homes of the test's own, never the

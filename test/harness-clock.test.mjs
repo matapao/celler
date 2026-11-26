@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { CreateTaskResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { AgentRuntime } from '@matapao/celler/harness';
+import { AgentRuntime } from 'celler/harness';
 import { harnessLimits } from '../dist/limits.js';
 import { until } from './support.mjs';
 import { oneCell, fakeClaude, host, inFolder, spec } from './support-harness.mjs';

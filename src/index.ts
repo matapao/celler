@@ -13,4 +13,4 @@ export {
 } from './tables.js';
 export { createBroker, type BrokerCommand } from './broker.js';
 export { postJson, readMcp } from './connectors.js';
-// The approval preview is browser code: import it from "@matapao/celler/preview".
+// The approval preview is browser code: import it from "celler/preview".

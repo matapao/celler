@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { AgentRuntime, chosenPrograms, claudeAgent, codexAgent, findProgram } from '@matapao/celler/harness';
+import { AgentRuntime, chosenPrograms, claudeAgent, codexAgent, findProgram } from 'celler/harness';
 import { agentVersions } from '../dist/limits.js';
 import { agentEnv, CODEX_TARGETS, codexProgram } from '../dist/harness/programs.js';
 import {
@@ -108,7 +108,7 @@ test("Codex runs only with its features as celler decides them: one it doesn't t
     assert.equal(readFileSync(asked, 'utf8'), 'asked\n'.repeat(4));
     writeFileSync(
       own,
-      'shell_tool   stable   true\nbrand_new_tool   removed   true\nmulti_agent   deprecated   true\n',
+      'shell_tool   stable   true\nbrand_new_tool   removed   true\nguardian_approval   stable   true\n',
     );
     const fit = await runtime.health(false);
     assert.deepEqual([fit.ok, fit.detail], [true, `${named} (not yet test-run)`]);

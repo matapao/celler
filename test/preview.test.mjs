@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { showApproval, showWrite } from '@matapao/celler/preview';
+import { showApproval, showWrite } from 'celler/preview';
 
 function mockDom() {
   const makeNode = (tag) => ({

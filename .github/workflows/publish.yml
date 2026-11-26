@@ -1,9 +1,8 @@
 name: Publish
-# A version tag (v0.2.0) publishes that version to GitHub Packages' npm registry once Test and Security have passed.
-# Those run with read access only; the one job that can write runs no tests and installs only what the lockfile names.
-# It builds and packs the package once, attests that tarball (GitHub artifact attestations: npm's own provenance has no
-# route on GitHub Packages), publishes exactly that file, and attaches it with its SBOM to the tag's GitHub release,
-# where it downloads without a token.
+# A version tag (v0.2.0) releases that version once Test and Security have passed. Those run with read access only;
+# the one job that can write runs no tests and installs only what the lockfile names. It builds and packs the package
+# once, attests that tarball (GitHub artifact attestations), and attaches it with its SBOM to the tag's GitHub release.
+# That file, as it is, is what goes to npm as `celler` (AGENTS.md, Releasing).
 # Consumers verify with: gh attestation verify <tarball> --repo matapao/celler
 on:
   push:
@@ -20,26 +19,21 @@ jobs:
       live: true
 
   publish:
-    name: Publish @matapao/celler
+    name: Release celler
     needs: [test, security]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: write # the release and its assets
-      packages: write # GitHub Packages
       id-token: write # the attestation's signing identity
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # registry-url and scope write a user-level npmrc (NPM_CONFIG_USERCONFIG) that reads the token from
-      # NODE_AUTH_TOKEN; pnpm does not expand variables in a project's .npmrc, so there is none here.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24.22.3'
-          registry-url: 'https://npm.pkg.github.com'
-          scope: '@matapao'
           package-manager-cache: false # nothing cached may reach what is published
       - run: corepack enable pnpm
       - name: The tag names the version in package.json
@@ -59,26 +53,9 @@ jobs:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: release/*.tgz
-      # GitHub's registry answers 401 without a token and 404 for a package it does not have yet, so anything but a
-      # version or a 404 (pnpm's ERR_PNPM_FETCH_404, npm's E404) means pnpm is not using the token.
-      - name: pnpm authenticates to GitHub Packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if out=$(pnpm view @matapao/celler version --registry https://npm.pkg.github.com 2>&1); then
-            echo "Published already: $out"
-          elif echo "$out" | grep -qE 'ERR_PNPM_FETCH_404|E404'; then
-            echo 'Authenticated; this is the first version'
-          else
-            echo "$out"; echo 'pnpm is not authenticated to npm.pkg.github.com'; exit 1
-          fi
-      - name: Publish the attested tarball
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pnpm publish release/*.tgz --no-git-checks --registry https://npm.pkg.github.com
       - name: The release, with the tarball and its SBOM
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" release/*.tgz release/sbom.cdx.json --verify-tag --title "$GITHUB_REF_NAME" \
-            --notes "@matapao/celler $GITHUB_REF_NAME. Verify the tarball with: gh attestation verify <tarball> --repo $GITHUB_REPOSITORY"
+            --notes "celler $GITHUB_REF_NAME. Verify the tarball with: gh attestation verify <tarball> --repo $GITHUB_REPOSITORY"

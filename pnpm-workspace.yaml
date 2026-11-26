@@ -17,6 +17,9 @@ trustPolicy: no-downgrade
 trustPolicyIgnoreAfter: 43200
 blockExoticSubdeps: true
 strictDepBuilds: true
+allowBuilds:
+  # Its script only checks the program its own platform's package brings, which it runs from there as it is.
+  esbuild: false
 
 # The agent SDKs' bundled copies of Claude Code and Codex: celler runs the person's own (harness/programs.ts), so none is
 # installed.
