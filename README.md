@@ -59,7 +59,8 @@ pnpm install --frozen-lockfile && pnpm check
 
 ## Security
 
-Report a vulnerability privately, with GitHub's "Report a vulnerability" on this repository's Security tab. celler is a hobby project kept in spare time: a report is looked at on a best-effort basis, when time allows. Check a release's tarball with `gh attestation verify <tarball> --repo matapao/celler`.
+Report a vulnerability privately, as [.github/SECURITY.md](.github/SECURITY.md) says. Verify a release's tarball with
+`gh attestation verify <tarball> --repo matapao/celler`.
 
 ## License
 
