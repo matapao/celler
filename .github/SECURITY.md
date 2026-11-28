@@ -1,4 +1,3 @@
 # Security
 
-Report a vulnerability privately at https://github.com/matapao/celler/security/advisories/new, not in a public issue.
-Reports are handled on a best-effort basis; please allow time for a fix before any public disclosure.
+Report a vulnerability privately at https://github.com/matapao/celler/security/advisories/new; please don't disclose it publicly.
