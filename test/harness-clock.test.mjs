@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { before } from 'node:test';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -152,12 +152,37 @@ const working = (work) => ({
   },
 });
 
+// A test process's first run asks the stand-in's program its version, which versions.ts then keeps. On a busy computer
+// with coverage on, that can take longer than a whole run here may, and whichever test the random order puts first
+// would time out before it got to what it tests. So it is asked once, in a run before the tests, which also starts
+// their server and client code once: each run's clock then counts only what its test means it to.
+before(() =>
+  inFolder(async (dir) => {
+    const agent = working(async () => 'Ready');
+    const { platform, app, revision } = oneCell(() => new AgentRuntime(agent, host));
+    try {
+      const result = await app.start({
+        owner: 'alice',
+        revision,
+        entry: 'main',
+        workspace: dir,
+        input: 'Get ready',
+      });
+      assert.equal(result.isError, false, result.structuredContent?.error);
+    } finally {
+      await platform.close();
+    }
+  }),
+);
+
 test("a run's clock stands still while one of its calls waits for the person in the inbox: approved after longer than the run may take, it ends as its agent did", () =>
   inFolder(async (dir) => {
     const fake = fakeClaude({ FAKE_CLAUDE_LOG: path.join(dir, 'agent.jsonl'), FAKE_CLAUDE_TOOL: 'send' });
+    // Its clock counts the stand-in's own start as a process, which a busy computer can make slow: three seconds for it
+    // to start and call, as the first test here gives it.
     const { platform, app } = oneCell(
       () => new AgentRuntime(fake, host),
-      { spec: within(1_000) },
+      { spec: within(3_000) },
       new Map([['sender', sender]]),
     );
     try {
@@ -170,7 +195,7 @@ test("a run's clock stands still while one of its calls waits for the person in 
       });
       const { id } = await pendingIn(app);
       // The person takes longer than the whole run may.
-      await delay(1_500);
+      await delay(3_500);
       await app.human.approve('alice', id);
       const result = await started;
       assert.equal(result.isError, false, result.structuredContent?.error);
