@@ -54,7 +54,7 @@
     "@types/node": "^24.19.2",
     "esbuild": "0.28.2",
     "fast-check": "4.10.3",
-    "knip": "6.46.1",
+    "knip": "6.47.0",
     "oxlint": "1.94.0",
     "oxlint-tsgolint": "7.0.2007",
     "prettier": "3.10.1",
